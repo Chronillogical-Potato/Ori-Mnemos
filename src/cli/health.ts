@@ -13,6 +13,7 @@ import { parseFrontmatter } from "../core/frontmatter.js";
 import { computeVitality } from "../core/vitality.js";
 import { initDB } from "../core/engine.js";
 import { getLearningHealth } from "../core/qvalue.js";
+import { llmKeyProblem } from "../core/llm.js";
 
 export type HealthResult = {
   success: boolean;
@@ -153,6 +154,13 @@ export async function runHealth(
     // No index yet — learning health is simply unavailable, not an error.
   }
 
+  // Configured-but-unusable LLM (#42). Promote falls back to the deterministic
+  // path, so the only downstream symptom is empty descriptions weeks later;
+  // health is where people look when that happens.
+  const configWarnings: string[] = [];
+  const keyProblem = llmKeyProblem(config.llm);
+  if (keyProblem) configWarnings.push(keyProblem);
+
   return {
     success: true,
     data: {
@@ -165,6 +173,6 @@ export async function runHealth(
       fading,
       ...(learning ? { learning } : {}),
     },
-    warnings: learningWarnings,
+    warnings: [...configWarnings, ...learningWarnings],
   };
 }

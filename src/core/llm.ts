@@ -97,7 +97,47 @@ function resolveApiKey(config: LlmConfig): string | undefined {
 }
 
 /**
+ * Explain why a configured LLM provider has no usable API key, or return null
+ * when there is nothing wrong that can be seen without running api_key_cmd.
+ *
+ * "Not configured" (provider: null) is a legitimate choice and returns null.
+ * "Configured but unusable" is a configuration error: before #42 it fell back
+ * to NullProvider silently, and the only visible symptom was a generic
+ * "configure LLM" hint that blamed the user while notes piled up with empty
+ * descriptions.
+ */
+export function llmKeyProblem(config: LlmConfig): string | null {
+  if (!config.provider) return null;
+  if (config.api_key_cmd) return null; // only knowable by running it; createProvider reports that case
+  if (config.api_key_env) {
+    // Same test resolveApiKey applies, so health and runtime agree.
+    if (process.env[config.api_key_env]) return null;
+    return (
+      `llm.api_key_env "${config.api_key_env}" is set in ori.config.yaml, but ` +
+      `${config.api_key_env} is not present in the environment — LLM features are disabled.`
+    );
+  }
+  return (
+    `llm.provider "${config.provider}" is set in ori.config.yaml, but neither ` +
+    `llm.api_key_env nor llm.api_key_cmd is set — LLM features are disabled.`
+  );
+}
+
+// One stderr line per distinct problem per process: createProvider runs once
+// per promote/explore, and a long-lived `ori serve` should not repeat itself.
+const reportedKeyProblems = new Set<string>();
+
+function reportKeyProblem(message: string): void {
+  if (reportedKeyProblems.has(message)) return;
+  reportedKeyProblems.add(message);
+  console.error(`[ori] ${message}`);
+}
+
+/**
  * Create provider from config. Returns NullProvider when provider is null.
+ * A provider that is configured but has no resolvable key also yields
+ * NullProvider, but says so on stderr (never stdout: CLI JSON and MCP stdio
+ * both live there).
  */
 export async function createProvider(config: LlmConfig): Promise<LlmProvider> {
   if (!config.provider) {
@@ -107,6 +147,10 @@ export async function createProvider(config: LlmConfig): Promise<LlmProvider> {
   const apiKey = resolveApiKey(config);
 
   if (!apiKey) {
+    reportKeyProblem(
+      llmKeyProblem(config) ??
+        `llm.api_key_cmd produced no key (and no llm.api_key_env fallback resolved) — LLM features are disabled.`,
+    );
     return new NullProvider();
   }
 

@@ -14,6 +14,7 @@ import type { VaultIndex } from "../core/linkdetect.js";
 import type { ProjectKeywordConfig } from "../core/classify.js";
 import {
   createProvider,
+  llmKeyProblem,
   NullProvider,
   type EnhancementSuggestions,
   type VaultContext,
@@ -163,6 +164,9 @@ export async function runPromote(
   const vaultContext = buildVaultContext(vaultIndex);
   const provider = await createProvider(config.llm);
   const hasLlm = !(provider instanceof NullProvider);
+  // Non-null when an LLM is configured but unusable (#42). Used to replace the
+  // generic "configure LLM" hint, which is wrong when the user already did.
+  const keyProblem = hasLlm ? null : llmKeyProblem(config.llm);
 
   // Resolve target inbox notes
   const allInbox = await listInboxNotes(paths.inbox);
@@ -195,16 +199,19 @@ export async function runPromote(
   const skipped: Array<{ path: string; reason: string }> = [];
 
   if (requireLlm && !hasLlm) {
+    const reason = keyProblem
+      ? `LLM enhancement required but unavailable: ${keyProblem}`
+      : "LLM enhancement required but no provider is configured";
     return {
       success: true,
       data: {
         promoted,
         skipped: targets.map((filename) => ({
           path: path.join(paths.inbox, filename),
-          reason: "LLM enhancement required but no provider is configured",
+          reason,
         })),
       },
-      warnings: ["LLM enhancement required but no provider is configured"],
+      warnings: [reason],
     };
   }
 
@@ -262,6 +269,14 @@ export async function runPromote(
 
     if (enhancement.reasoning) {
       result.changes.push(`LLM reasoning: ${enhancement.reasoning}`);
+    }
+
+    if (keyProblem) {
+      result.warnings = result.warnings.map((w) =>
+        w.startsWith("No description found")
+          ? `No description found, and the configured LLM could not generate one: ${keyProblem}`
+          : w,
+      );
     }
 
     const destPath = path.join(paths.notes, result.destinationFilename);
