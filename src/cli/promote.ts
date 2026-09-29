@@ -118,17 +118,24 @@ function titleFromFilename(filename: string): string {
 function mergeEnhancementOverrides(
   options: PromoteOptions,
   suggestions: EnhancementSuggestions,
+  existing: Record<string, unknown> = {},
 ): {
   type?: string;
   description?: string;
   links?: string[];
   project?: string[];
 } {
+  // Priority: explicit caller override > what the note already says > LLM (#39).
+  // The LLM fills gaps; it never replaces a description or project someone
+  // wrote (e.g. `ori_add` with description, promoted later).
+  const hasDescription =
+    typeof existing.description === "string" && existing.description.trim().length > 0;
+  const hasProject = Array.isArray(existing.project) && existing.project.length > 0;
   return {
     type: options.type ?? suggestions.type,
-    description: options.description ?? suggestions.description,
+    description: options.description ?? (hasDescription ? undefined : suggestions.description),
     links: options.links,
-    project: options.project ?? suggestions.project,
+    project: options.project ?? (hasProject ? undefined : suggestions.project),
   };
 }
 
@@ -261,7 +268,7 @@ export async function runPromote(
       body: parsed.body,
       existingTitles: vaultIndex.titles,
       vaultIndex,
-      overrides: mergeEnhancementOverrides(options, enhancement),
+      overrides: mergeEnhancementOverrides(options, enhancement, parsed.data as Record<string, unknown>),
       projectConfig,
       mapRouting,
       defaultArea,

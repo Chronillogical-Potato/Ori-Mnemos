@@ -573,7 +573,8 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
   // ori_add
   server.tool(
     "ori_add",
-    "Create a note in inbox",
+    "Create a note in inbox. Always pass description and project: you know them now, and a note " +
+      "without them fails the vault schema.",
     {
       title: z.string().describe("Note title (prose-as-title)"),
       type: z.string().optional().describe("Note type (default: insight)"),
@@ -583,13 +584,17 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
         .describe(
           "Note body content. If omitted, creates a template stub that must be filled before promotion."
         ),
+      description: z.string().optional().describe("One sentence adding context beyond the title (max 200 chars)"),
+      project: z.array(z.string()).optional().describe("Project tags that apply to this note"),
     },
-    async ({ title, type, content }) => {
+    async ({ title, type, content, description, project }) => {
       const result = await runAdd({
         startDir: vaultDir,
         title,
         type: type ?? "insight",
         content: content ?? undefined,
+        description: description ?? undefined,
+        project: project ?? undefined,
       });
 
       // Log to reward accumulator for forward citation detection

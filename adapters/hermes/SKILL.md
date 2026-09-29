@@ -214,6 +214,7 @@ ori_query_similar query="authentication middleware"
 ### Capture tools
 
 **`ori_add`** — Capture an insight to inbox. Always provide a prose-as-title claim and a type.
+Pass `description` and `project`.
 
 ```
 ori_add title="redis was chosen over memcached because we need pub/sub for real-time updates" type=decision

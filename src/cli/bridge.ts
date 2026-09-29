@@ -771,6 +771,7 @@ Every session: Orient -> Work -> Persist
 ### Work
 - Use \`ori_query_ranked\` to find related notes before creating new ones
 - Use \`ori_add\` to capture insights to inbox/
+- Pass \`description\` and \`project\` to \`ori_add\`
 - NEVER write to notes/ directly — use \`ori_add\` then \`ori_promote\`
 
 ### Persist
@@ -1057,6 +1058,7 @@ Every session: Orient -> Work -> Persist
 ### Work
 - Use \`ori_query_ranked\` to find related notes before creating new ones
 - Use \`ori_add\` to capture insights to inbox/
+- Pass \`description\` and \`project\` to \`ori_add\`
 - NEVER write to notes/ directly — use \`ori_add\` then \`ori_promote\`
 
 ### Persist

@@ -17,6 +17,10 @@ export type AddOptions = {
   title: string;
   type?: string;
   content?: string;
+  /** One sentence adding context beyond the title (#39). */
+  description?: string;
+  /** Project tags (#39). */
+  project?: string[];
 };
 
 export type AddResult = {
@@ -71,10 +75,14 @@ export async function runAdd(options: AddOptions): Promise<AddResult> {
   const now = new Date();
   const created = now.toISOString().slice(0, 10);
 
+  // #39: the caller (usually an agent over MCP) knows these at creation time.
+  // Written into the inbox note so they exist whether or not it auto-promotes.
+  const description = options.description?.trim() ?? "";
+  const project = (options.project ?? []).map((t) => t.trim()).filter((t) => t.length > 0);
   const frontmatter = {
-    description: "",
+    description,
     type,
-    project: [],
+    project,
     status: "inbox",
     created,
     last_accessed: created,
@@ -169,6 +177,9 @@ export async function runAdd(options: AddOptions): Promise<AddResult> {
       const promoteResult = await runPromote({
         startDir: options.startDir,
         noteName: filename,
+        // Passed as explicit overrides so a configured LLM cannot replace them.
+        description: description || undefined,
+        project: project.length > 0 ? project : undefined,
       });
       if (promoteResult.success && promoteResult.data.promoted.length > 0) {
         const promoted = promoteResult.data.promoted[0];

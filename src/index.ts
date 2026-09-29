@@ -190,7 +190,9 @@ program
   .option("-c, --content <content>", "note body content (replaces template placeholder)")
   .option("-f, --content-file <path>", "path to file containing note body content")
   .option("--content-stdin", "read note body content from stdin")
-  .action(async (title: string, options: { type: string; content?: string; contentFile?: string; contentStdin?: boolean }) => {
+  .option("-d, --description <desc>", "one sentence adding context beyond the title")
+  .option("-p, --project <projects...>", "project tags")
+  .action(async (title: string, options: { type: string; content?: string; contentFile?: string; contentStdin?: boolean; description?: string; project?: string[] }) => {
     let content = options.content;
     if (options.contentFile) {
       content = readFileSync(options.contentFile, "utf8");
@@ -200,7 +202,7 @@ program
       for await (const chunk of process.stdin) chunks.push(chunk);
       content = Buffer.concat(chunks).toString("utf8");
     }
-    const result = await runAdd({ startDir: process.cwd(), title, type: options.type, content });
+    const result = await runAdd({ startDir: process.cwd(), title, type: options.type, content, description: options.description, project: options.project });
     console.log(JSON.stringify(result));
   });
 

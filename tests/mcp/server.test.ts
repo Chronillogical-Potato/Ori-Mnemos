@@ -184,6 +184,20 @@ describe("ori_add", () => {
     expect(data.data.path).toBeDefined();
   });
 
+  it("accepts description and project, and the note validates (#39)", async () => {
+    const { parsed } = await callTool(ctx.client, "ori_add", {
+      title: "mcp agents can supply the schema fields at creation",
+      type: "insight",
+      content: "Created over MCP with description and project.",
+      description: "Agents pass description and project to ori_add so notes validate",
+      project: ["ori"],
+    });
+    const data = parsed as { success: boolean; data: { path: string } };
+    expect(data.success).toBe(true);
+    const { parsed: v } = await callTool(ctx.client, "ori_validate", { path: data.data.path });
+    expect((v as { success: boolean; errors: string[] }).success).toBe(true);
+  });
+
   it("rejects invalid titles", async () => {
     const { parsed } = await callTool(ctx.client, "ori_add", {
       title: "x",
