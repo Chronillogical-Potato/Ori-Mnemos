@@ -274,7 +274,7 @@ export async function runReadOnlySql(
 
 /** One line per table, so the agent knows what it is looking at. */
 const SCHEMA_DOCS: Record<string, string> = {
-  v_note: "one row per note: slug, title, type, modified, access_count, inbound, outbound, pagerank, betweenness, q_value. Start here.",
+  v_note: "one row per note: slug, title, type, modified, access_count, inbound, outbound, pagerank, betweenness, q_value (NULL until learned). Start here.",
   v_link: "wiki-link edges that resolve, as (src, src_title, dst, dst_title)",
   v_dangling: "wiki-link targets that do not exist, with how many notes cite them",
   v_retrieval: "every note ever returned to you: session_id, timestamp, query_text, slug, rank, final_score",

@@ -48,7 +48,6 @@ import {
   STAGE_CONFIGS,
 } from "../core/stage-learner.js";
 import { StageTracker, measureCurrentQuality } from "../core/stage-tracker.js";
-import { SessionRewardAccumulator } from "../core/reward.js";
 import {
   initQValueTables, logRetrieval, incrementExposure,
 } from "../core/qvalue.js";
@@ -606,6 +605,7 @@ export async function runQueryRanked(
 
   // Layer 1: Phase B Q-value reranking
   let ranked = dampened;
+  const phaseBDebug = new Map<string, { simNorm: number; qNorm: number; ucb: number }>();
   const qRerankDecision = shouldRun("q_reranking");
   if (
     useIntelligence &&
@@ -615,7 +615,9 @@ export async function runQueryRanked(
   ) {
     trackStage("q_reranking", dampened);
     const t5 = performance.now();
-    ranked = phaseB(mainDb, dampened, query, classified.intent, activeSession);
+    // record=false: exposure and retrieval_log are written once, below, for
+    // the notes actually returned.
+    ranked = phaseB(mainDb, dampened, query, classified.intent, activeSession, {}, false, phaseBDebug);
     pipelineElapsed += performance.now() - t5;
     trackStageAfter("q_reranking", ranked);
   }
@@ -728,19 +730,10 @@ export async function runQueryRanked(
     }
   }
 
-  // Item 5: credit the retrieval, which nothing on the CLI path ever did.
-  //
-  // `SessionRewardAccumulator` was constructed only in serve.ts, so a CLI query
-  // logged nothing and `updateQ` was never reached through a sanctioned path.
-  // The gate inside `updateQ` (writes only from `session_batch` or
-  // `explore_conclude`) is correct and stays - it exists to prevent a
-  // documented degenerate feedback loop. What was missing was anyone calling
-  // through it. Result: Q-values frozen at the initialisation constant, so
-  // `q_reranking` was ranking a number that had never been learned.
-  //
-  // One accumulator per invocation, concluded before returning. Failure here
-  // must never fail the query: retrieval already succeeded, and losing a
-  // learning update is strictly less bad than losing the answer.
+  // Item 5 wired the CLI into Q credit; #37 took the credit back out and kept
+  // the observation. A CLI query can record what it showed (exposure,
+  // retrieval_log) but cannot see what happened next, so it does not credit.
+  // Failure here must never fail the query.
   // Live stage learning. The server updates LinUCB and calls `saveStage` after
   // every query (serve.ts:917-925); the CLI recorded decisions into `stage_log`
   // but never wrote the learned policy back, so `stage_q` stayed empty and the
@@ -762,30 +755,29 @@ export async function runQueryRanked(
   }
 
   try {
-    const accumulator = new SessionRewardAccumulator(activeSession);
-    withExploration.forEach((result, position) => {
-      // rank is 1-based: the credit model weights by position, and a 0 here
-      // would make the top hit indistinguishable from an unranked one.
-      accumulator.logRetrieval(result.title, position + 1, query, classified.intent);
-    });
-    // Default source `session_batch`, which is what the `updateQ` gate allows.
-    // A new source string would be rejected by ALLOWED_SOURCES, and widening
-    // that set to label CLI traffic would weaken the guard that exists to stop
-    // a degenerate feedback loop. The session id already records provenance:
-    // CLI sessions are minted with a `cli-` prefix.
     // `retrieval_log` is the exposure record item 8 reasons over ("top-50 hold
     // 47.2% of all exposure; ~280 notes never surfaced once"), and the CLI was
     // contributing nothing to it - so the exposure statistics described a
     // fraction of actual usage. Exposure is incremented for RETURNED notes
     // only, matching the correction made in qvalue.ts.
     withExploration.forEach((result, position) => {
+      // Real blend inputs when Phase B ran, so a lambda re-measurement on these
+      // rows sees Q (it logged the final score as similarity, Q and UCB as 0).
+      // Rank is 0-based, like Phase B and the MCP server.
+      const dbg = phaseBDebug.get(result.title);
       logRetrieval(
         mainDb, activeSession, query, classified.intent, result.title,
-        position + 1, result.score, 0, 0, result.score,
+        position, dbg?.simNorm ?? result.score, dbg?.qNorm ?? 0, dbg?.ucb ?? 0, result.score,
       );
       incrementExposure(mainDb, result.title);
     });
-    accumulator.concludeSession(mainDb);
+    // No concludeSession here (#37). A single CLI query is its own session, so
+    // no follow-up can ever be observed: forward citation, update and
+    // downstream creation are unreachable and the only payable outcomes were
+    // 0 and the dead-end penalty. On one vault that was 3,075 updates with
+    // zero positive. Exposure and retrieval_log above are still recorded -
+    // they are observations, not credit. The MCP server, which can see
+    // outcomes across a session, still credits through the sanctioned path.
   } catch (err: unknown) {
     warnings.push(
       `Learning update skipped: ${err instanceof Error ? err.message : String(err)}`,

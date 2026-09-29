@@ -66,18 +66,23 @@ function count(db: InstanceType<typeof Database>, sql: string): number {
 }
 
 describe("a CLI query learns (fix-list items 5, 9, 10)", () => {
-  it("credits Q-values through the sanctioned path", async () => {
+  it("records exposure but does not credit Q (#37)", async () => {
+    // Item 5 made the CLI credit Q; #37 reversed the credit half. A one-shot
+    // query cannot observe a follow-up, so the only rewards it could pay were
+    // 0 and the dead-end penalty: 3,075 updates, zero positive, on one vault.
+    // Exposure is an observation and is still recorded.
     await runQueryRanked(vault, "agents remember memory", 2);
     const db = open();
     try {
       const tracked = count(db, "SELECT COUNT(*) c FROM note_q");
-      expect(tracked, "a CLI query must produce note_q rows").toBeGreaterThan(0);
-      // The number that was 10 of 717. An unlearned row is indistinguishable
-      // from the initialisation constant, which is the whole of item 5.
+      expect(tracked, "a CLI query must record exposure rows").toBeGreaterThan(0);
+      expect(count(db, "SELECT COUNT(*) c FROM note_q WHERE exposure_count > 0")).toBe(tracked);
+      expect(count(db, "SELECT COUNT(*) c FROM retrieval_log")).toBeGreaterThan(0);
       expect(
         count(db, "SELECT COUNT(*) c FROM note_q WHERE update_count > 0"),
-        "every tracked note must have been credited, not left at init",
-      ).toBe(tracked);
+        "a CLI query must not write Q credit",
+      ).toBe(0);
+      expect(count(db, "SELECT COUNT(*) c FROM q_history")).toBe(0);
     } finally {
       db.close();
     }

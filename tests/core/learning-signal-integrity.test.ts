@@ -140,19 +140,21 @@ describe("defect 4: exposure correction cannot erase a real signal", () => {
     for (let i = 0; i < 300; i++) incrementExposure(db, "index");
 
     const reward = acc.computeRewards(db).get("index")!;
-    // At the old EXPOSURE_BETA of 0.5 this was 1.0/17.3 = 0.058 — below the
-    // noise floor of the rank proxy running at the time, so `index` decayed to
-    // Q=0.0165 despite being the most-retrieved note in the vault.
-    expect(reward).toBeGreaterThanOrEqual(0.2);
+    // At EXPOSURE_BETA 0.5 this was 0.058 and `index` decayed to Q=0.0165; at
+    // 0.25 with a 0.2 floor it was 0.24. Since #37 exposure does not divide
+    // credit at all: a citation is a citation.
+    expect(reward).toBeCloseTo(1.0, 10);
   });
 
-  it("does not damp penalties", () => {
+  it("never credits a dead end, however exposed the note is (#37)", () => {
+    // Was "does not damp penalties". The dead-end penalty itself is gone: a
+    // top hit the agent read but did not cite is indistinguishable from a
+    // useless one, and penalising it demoted notes for being read.
     const acc = new SessionRewardAccumulator("s1");
     acc.logRetrieval("dud", 0, "q", "semantic");
     for (let i = 0; i < 300; i++) incrementExposure(db, "dud");
-    // Dead end at rank 0, unmodified by exposure: damping penalties would make
-    // popular notes progressively harder to demote.
-    expect(acc.computeRewards(db).get("dud")!).toBeCloseTo(-0.15, 10);
+    expect(acc.computeRewards(db).has("dud")).toBe(false);
+    expect(acc.getSignalCounts().dead_end).toBe(1);
   });
 
   it("keeps exposure and Q from anti-correlating", () => {
@@ -490,11 +492,12 @@ describe("defect 5: the absence of a learning signal is observable", () => {
     acc.logRetrieval("note-b", 3, "q", "semantic");
     acc.logAdd("Synthesis", "from [[note a]]");
 
-    expect(acc.concludeSession(db)).toBe(2);
+    // Since #37 only the cited note is credited; note-b was retrieved
+    // alongside and stays unlearned by design.
+    expect(acc.concludeSession(db)).toBe(1);
     const health = getLearningHealth(db);
-    expect(health.neverUpdated).toBe(0);
-    expect(health.exposedButNeverUpdated).toBe(0);
-    expect(health.totalUpdates).toBe(2);
+    expect(health.totalUpdates).toBe(1);
+    expect(getQ(db, "note-a")).toBeGreaterThan(0);
   });
 });
 

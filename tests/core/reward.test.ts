@@ -2,8 +2,6 @@ import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import {
   SessionRewardAccumulator,
-  EXPOSURE_BETA,
-  MIN_EXPOSURE_RETENTION,
 } from "../../src/core/reward.js";
 import {
   initQValueTables,
@@ -60,9 +58,9 @@ describe("SessionRewardAccumulator", () => {
       acc.logAdd("new-note", "References [[note-x]] which was not retrieved");
 
       const rewards = acc.computeRewards(db);
-      // note-a was retrieved but not cited, and a creation happened
-      expect(rewards.has("note-a")).toBe(true);
-      expect(rewards.get("note-a")!).toBeLessThan(1.0);
+      // note-a was retrieved but not cited: no credit, even though a creation
+      // happened (#37 review: downstream creation is reported, not credited).
+      expect(rewards.has("note-a")).toBe(false);
     });
   });
 
@@ -77,17 +75,25 @@ describe("SessionRewardAccumulator", () => {
     });
   });
 
-  describe("downstream creation reward", () => {
-    it("gives position-weighted reward when a new note is created after retrieval", () => {
+  describe("downstream creation (#37 review: reported, not credited)", () => {
+    it("does not credit notes the new content does not link to", () => {
       const acc = new SessionRewardAccumulator("s1");
       acc.logRetrieval("note-a", 0, "query", "semantic");
       acc.logRetrieval("note-b", 2, "query", "semantic");
       acc.logAdd("new-note", "A new insight"); // no [[citation]]
 
       const rewards = acc.computeRewards(db);
-      // note-a at rank 0: 0.6 * (1 / log2(0+2)) = 0.6
-      // note-b at rank 2: 0.6 * (1 / log2(2+2)) = 0.3
-      expect(rewards.get("note-a")!).toBeGreaterThan(rewards.get("note-b")!);
+      expect(rewards.size).toBe(0);
+      expect(acc.getSignalCounts().downstream_creation).toBe(2);
+    });
+  });
+
+  describe("re-recall (#37 review)", () => {
+    it("needs distinct queries: a retry of the same query is not a re-recall", () => {
+      const acc = new SessionRewardAccumulator("s1");
+      acc.logRetrieval("note-a", 0, "same query", "semantic");
+      acc.logRetrieval("note-a", 0, "Same Query ", "semantic");
+      expect(acc.computeRewards(db).has("note-a")).toBe(false);
     });
   });
 
@@ -99,64 +105,66 @@ describe("SessionRewardAccumulator", () => {
       acc.logRetrieval("note-c", 3, "query", "semantic");
 
       const rewards = acc.computeRewards(db);
-      // Top-3 (rank <= 2): note-a and note-b get penalty
-      expect(rewards.get("note-a")!).toBeLessThan(0);
-      expect(rewards.get("note-b")!).toBeLessThan(0);
-      // Rank 3 (> 2): no penalty
-      expect(rewards.get("note-c")).toBe(0);
+      // Top-3 with no follow-up: reported as dead_end, never credited (#37
+      // review). Read-and-answered-from is indistinguishable from useless.
+      expect(rewards.has("note-a")).toBe(false);
+      expect(rewards.has("note-b")).toBe(false);
+      expect(acc.getSignalCounts().dead_end).toBe(2);
+      // Rank 3 (> 2): neutral, which is no signal and so no update at all
+      // (#37). Writing it as reward 0 pulled Q toward 0 on every retrieval.
+      expect(rewards.has("note-c")).toBe(false);
+      expect(acc.getSignalCounts().neutral).toBe(1);
     });
 
-    it("applies IPS-debiased penalty (rank-weighted)", () => {
+    it("partial follow-up is reported but never lowers a learned Q (#37)", () => {
+      const acc0 = new SessionRewardAccumulator("s0");
+      acc0.logRetrieval("hub", 0, "q", "semantic");
+      acc0.logRetrieval("hub", 0, "q2", "semantic"); // re-recall: +0.4
+      acc0.concludeSession(db);
+      const learned = getQ(db, "hub");
+      // "other" is updated, nothing is created: hub falls to partial_follow_up.
+      const acc = new SessionRewardAccumulator("s1");
+      acc.logRetrieval("hub", 1, "q", "semantic");
+      acc.logRetrieval("other", 0, "q", "semantic");
+      acc.logUpdate("other");
+      const rewards = acc.computeRewards(db);
+      expect(acc.getSignalCounts().partial_follow_up).toBe(1);
+      expect(rewards.has("hub")).toBe(false);
+      acc.concludeSession(db);
+      expect(getQ(db, "hub")).toBe(learned);
+    });
+
+    it("never lowers Q of a note that was only read (#37)", () => {
       const acc = new SessionRewardAccumulator("s1");
       acc.logRetrieval("note-a", 0, "query", "semantic");
-      acc.logRetrieval("note-b", 2, "query", "semantic");
-
-      const rewards = acc.computeRewards(db);
-      // Rank 0: -0.15 / (0+1) = -0.15
-      // Rank 2: -0.15 / (2+1) = -0.05
-      expect(rewards.get("note-a")!).toBeCloseTo(-0.15, 10);
-      expect(rewards.get("note-b")!).toBeCloseTo(-0.05, 10);
+      acc.concludeSession(db);
+      expect(getQ(db, "note-a")).toBe(DEFAULT_Q);
     });
   });
 
-  describe("exposure correction", () => {
-    it("diminishes reward for highly-exposed notes", () => {
-      // Set exposure count to 10 for note-a
-      for (let i = 0; i < 10; i++) incrementExposure(db, "note-a");
-
+  describe("no exposure correction on credit (#37)", () => {
+    it("pays the full signal regardless of how often the note was shown", () => {
+      // With an EMA, dividing credit by lifetime exposure made Q's ceiling fall
+      // with use: cited every session, a note peaked at 0.48 and sank to 0.20.
+      for (let i = 0; i < 300; i++) incrementExposure(db, "note-a");
       const acc = new SessionRewardAccumulator("s1");
       acc.logRetrieval("note-a", 0, "query", "semantic");
       acc.logAdd("new-note", "Extends [[note-a]]");
-
-      const rewards = acc.computeRewards(db);
-      // Derived from the live constants rather than a hardcoded number. This
-      // test previously asserted 1.0/10^0.5 = 0.316 against a literal, so when
-      // EXPOSURE_BETA moved 0.5 -> 0.25 on 2026-08-28 it failed for the right
-      // reason but with a misleading message. Reading the constants means the
-      // test now documents the RELATIONSHIP (reward shrinks with exposure,
-      // bounded below by the retention floor), not one arithmetic result.
-      const expected = Math.max(
-        1 / Math.pow(10, EXPOSURE_BETA),
-        MIN_EXPOSURE_RETENTION,
-      );
-      expect(rewards.get("note-a")!).toBeCloseTo(expected, 10);
-      // Guardrail: correction must bite, but must not erase a full citation.
-      expect(rewards.get("note-a")!).toBeLessThan(1.0);
-      expect(rewards.get("note-a")!).toBeGreaterThanOrEqual(
-        MIN_EXPOSURE_RETENTION,
-      );
+      expect(acc.computeRewards(db).get("note-a")!).toBeCloseTo(1.0, 10);
     });
 
-    it("does not correct for exposure count <= 1", () => {
-      incrementExposure(db, "note-a"); // exposure = 1
-
-      const acc = new SessionRewardAccumulator("s1");
-      acc.logRetrieval("note-a", 0, "query", "semantic");
-      acc.logAdd("new-note", "Extends [[note-a]]");
-
-      const rewards = acc.computeRewards(db);
-      // exposure=1, no correction applied
-      expect(rewards.get("note-a")!).toBeCloseTo(1.0, 10);
+    it("a note cited every session keeps climbing, and outranks one cited rarely", () => {
+      const cite = (id: string, sid: string) => {
+        const acc = new SessionRewardAccumulator(sid);
+        acc.logRetrieval(id, 0, "q", "semantic");
+        incrementExposure(db, id);
+        acc.logAdd(`n-${sid}`, `cites [[${id}]]`);
+        acc.concludeSession(db);
+      };
+      for (let s = 0; s < 40; s++) cite("hub", `h${s}`);
+      for (let s = 0; s < 3; s++) cite("niche", `n${s}`);
+      expect(getQ(db, "hub")).toBeGreaterThan(0.9);
+      expect(getQ(db, "hub")).toBeGreaterThan(getQ(db, "niche"));
     });
   });
 
@@ -168,8 +176,8 @@ describe("SessionRewardAccumulator", () => {
       // No follow-up, but re-recalled (ranks.length > 1)
 
       const rewards = acc.computeRewards(db);
-      // reward = 0.4 * (1 / 2) = 0.2
-      expect(rewards.get("note-a")!).toBeCloseTo(0.2, 10);
+      // Constant since #37 (was 0.4 / count)
+      expect(rewards.get("note-a")!).toBeCloseTo(0.4, 10);
     });
   });
 
@@ -200,8 +208,9 @@ describe("concludeSession (fix list item 5)", () => {
     acc.logRetrieval("note-c", 5, "q", "semantic");
     acc.logAdd("Synthesis", "building on [[note a]]");
 
-    expect(acc.concludeSession(db)).toBe(3);
-    for (const id of ["note-a", "note-b", "note-c"]) {
+    // Only the cited note is credited; b and c were retrieved alongside.
+    expect(acc.concludeSession(db)).toBe(1);
+    for (const id of ["note-a"]) {
       expect(getQState(db, id).updateCount).toBeGreaterThan(0);
       expect(getQState(db, id).learned).toBe(true);
     }
@@ -212,7 +221,10 @@ describe("concludeSession (fix list item 5)", () => {
 
   it("writes through the sanctioned source only", () => {
     const acc = new SessionRewardAccumulator("s1");
+    // Re-recalled, so it earns real credit (a lone top hit is a dead end,
+    // which is reported but never credited since #37).
     acc.logRetrieval("note-a", 0, "q", "semantic");
+    acc.logRetrieval("note-a", 0, "q2", "semantic");
     acc.concludeSession(db);
     const rows = db
       .prepare("SELECT DISTINCT reward_source FROM q_history")
@@ -225,7 +237,10 @@ describe("concludeSession (fix list item 5)", () => {
     // second flush would recompute over the same set and inflate update_count
     // and reward_sum on every pass.
     const acc = new SessionRewardAccumulator("s1");
+    // Re-recalled, so it earns real credit (a lone top hit is a dead end,
+    // which is reported but never credited since #37).
     acc.logRetrieval("note-a", 0, "q", "semantic");
+    acc.logRetrieval("note-a", 0, "q2", "semantic");
     expect(acc.concludeSession(db)).toBe(1);
     expect(acc.isFlushed()).toBe(true);
     expect(acc.concludeSession(db)).toBe(0);
@@ -244,7 +259,10 @@ describe("concludeSession (fix list item 5)", () => {
 
   it("accepts explore_conclude as the source for a navigated session", () => {
     const acc = new SessionRewardAccumulator("s1");
+    // Re-recalled, so it earns real credit (a lone top hit is a dead end,
+    // which is reported but never credited since #37).
     acc.logRetrieval("note-a", 0, "q", "semantic");
+    acc.logRetrieval("note-a", 0, "q2", "semantic");
     expect(acc.concludeSession(db, "explore_conclude")).toBe(1);
     const rows = db
       .prepare("SELECT DISTINCT reward_source FROM q_history")
@@ -254,7 +272,10 @@ describe("concludeSession (fix list item 5)", () => {
 
   it("cannot launder an unsanctioned source", () => {
     const acc = new SessionRewardAccumulator("s1");
+    // Re-recalled, so it earns real credit (a lone top hit is a dead end,
+    // which is reported but never credited since #37).
     acc.logRetrieval("note-a", 0, "q", "semantic");
+    acc.logRetrieval("note-a", 0, "q2", "semantic");
     expect(() => acc.concludeSession(db, "manual")).toThrow(
       /refusing write from source/,
     );

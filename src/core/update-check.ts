@@ -201,11 +201,15 @@ export async function buildAgentNotice(info: UpdateInfo): Promise<string | null>
 
 /** One notice per server session, across all tools. */
 export class SessionNoticeGate {
-  private shown = false;
+  private used = false;
   take(): boolean {
-    if (this.shown) return false;
-    this.shown = true;
+    if (this.used) return false;
+    this.used = true;
     return true;
+  }
+  /** True once `take` has succeeded; lets callers skip work up front. */
+  shown(): boolean {
+    return this.used;
   }
 }
 

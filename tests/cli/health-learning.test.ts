@@ -15,7 +15,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { initDB } from "../../src/core/engine.js";
-import { initQValueTables, incrementExposure, updateQ } from "../../src/core/qvalue.js";
+import { initQValueTables, incrementExposure, updateQ, logRetrieval } from "../../src/core/qvalue.js";
 import { runHealth } from "../../src/cli/health.js";
 import { runInit } from "../../src/cli/init.js";
 
@@ -30,12 +30,20 @@ afterEach(async () => {
   await fs.rm(vault, { recursive: true, force: true });
 });
 
-function seedTable(tracked: number, credited: number): void {
+function seedSessions(sessions: number, credited: number, cliQueries = 0): void {
   const db = initDB(path.join(vault, ".ori", "embeddings.db"));
   try {
     initQValueTables(db);
-    for (let i = 0; i < tracked; i++) incrementExposure(db, `note-${i}`);
-    for (let i = 0; i < credited; i++) updateQ(db, `note-${i}`, 0.5, "s1", "session_batch");
+    for (let s = 0; s < sessions; s++) {
+      logRetrieval(db, `mcp-${s}`, "q", "semantic", `note-${s}`, 0, 1, 0, 0, 1);
+      incrementExposure(db, `note-${s}`);
+      if (s < credited) updateQ(db, `note-${s}`, -0.15, `mcp-${s}`, "session_batch");
+    }
+    // CLI traffic: exposure and retrieval_log, never credit (#37).
+    for (let i = 0; i < cliQueries; i++) {
+      logRetrieval(db, `cli-${i}`, "q", "semantic", `cli-note-${i}`, 0, 1, 0, 0, 1);
+      incrementExposure(db, `cli-note-${i}`);
+    }
   } finally {
     db.close();
   }
@@ -46,22 +54,11 @@ async function learningWarning(): Promise<string | undefined> {
   return result.warnings.find((w) => w.includes("never received a Q-update"));
 }
 
-describe("ori health reports absent learning", () => {
-  it("warns when most tracked notes have never been credited", async () => {
-    seedTable(60, 10);
-    const warning = await learningWarning();
-    expect(warning).toBeDefined();
-    expect(warning).toContain("50 of 60");
-  });
-
-  it("stays quiet when a majority has been credited", async () => {
-    seedTable(60, 40);
-    expect(await learningWarning()).toBeUndefined();
-  });
-
-  it("stays quiet on a vault too small for the ratio to mean anything", async () => {
-    // A fresh vault legitimately has most notes uncredited for a while.
-    seedTable(20, 0);
+describe("ori health: no false 'never credited' alarm (#37)", () => {
+  // The session/note ratio check was removed: exposure without credit is now
+  // normal (CLI queries, neutral and dead-end outcomes). It must not come back.
+  it("stays quiet on agent sessions that read without crediting", async () => {
+    seedSessions(20, 0, 200);
     expect(await learningWarning()).toBeUndefined();
   });
 });

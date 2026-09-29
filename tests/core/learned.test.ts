@@ -74,7 +74,7 @@ describe("learned state export/import", () => {
     // it once; memory_events is created by nothing at all. After a rebuild
     // neither exists, so without DDL here their 902 rows are unrestorable.
     const orphans = LEARNED_TABLES.filter((t) => t.ddl).map((t) => t.name);
-    expect(orphans.sort()).toEqual(["memory_events", "q_history_genuine"]);
+    expect(orphans.sort()).toEqual(["memory_events", "q_history_genuine", "q_history_pre_37"]);
 
     const db = seed();
     const ndjson =
@@ -106,5 +106,40 @@ describe("learned state export/import", () => {
     for (const t of LEARNED_TABLES) {
       expect(t.columns, `${t.name} must not carry the autoincrement id`).not.toContain("id");
     }
+  });
+});
+
+describe("the #37 reset answer survives a rebuild", () => {
+  const withMeta = (rows: Array<[string, string]>) => {
+    const db = seed();
+    db.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)");
+    const ins = db.prepare("INSERT INTO meta VALUES (?, ?)");
+    for (const [k, v] of rows) ins.run(k, v);
+    ins.run("schema_version", "9"); // index bookkeeping: must not travel
+    return db;
+  };
+  const meta = (db: Database.Database) =>
+    Object.fromEntries((db.prepare("SELECT key, value FROM meta ORDER BY key").all() as { key: string; value: string }[]).map((r) => [r.key, r.value]));
+
+  it("export -> fresh index -> import keeps a permanent no and the ask count", () => {
+    const src = withMeta([["learning_reset_37", "declined:2026-09-28"], ["learning_reset_37_shown", "2"]]);
+    const { ndjson } = exportLearned(src);
+    src.close();
+    expect(ndjson).not.toContain("schema_version");
+    const dst = seed();
+    dst.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)");
+    importLearned(dst, ndjson);
+    expect(meta(dst)).toEqual({ learning_reset_37: "declined:2026-09-28", learning_reset_37_shown: "2" });
+    dst.close();
+  });
+
+  it("an import never overwrites a local no, and the ask count only grows", () => {
+    const src = withMeta([["learning_reset_37", "accepted:2026-01-01"], ["learning_reset_37_shown", "1"]]);
+    const { ndjson } = exportLearned(src);
+    src.close();
+    const dst = withMeta([["learning_reset_37", "declined:2026-09-28"], ["learning_reset_37_shown", "3"]]);
+    importLearned(dst, ndjson);
+    expect(meta(dst)).toMatchObject({ learning_reset_37: "declined:2026-09-28", learning_reset_37_shown: "3" });
+    dst.close();
   });
 });

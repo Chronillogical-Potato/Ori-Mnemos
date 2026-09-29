@@ -199,7 +199,9 @@ export function initIndexStore(db: DB): void {
                 WHERE g.note_id = n.id AND g.metric = 'pagerank') AS pagerank,
              (SELECT value FROM graph_metric g
                 WHERE g.note_id = n.id AND g.metric = 'betweenness') AS betweenness,
-             q.q_value, q.update_count AS q_updates, q.exposure_count
+             -- NULL until learned: the raw column holds 0.5 or 0 by table age (#37).
+             CASE WHEN q.update_count > 0 THEN q.q_value END AS q_value,
+             q.update_count AS q_updates, q.exposure_count
       FROM note n
       LEFT JOIN note_access a ON a.slug = n.slug
       LEFT JOIN note_q q ON q.note_id = n.slug;

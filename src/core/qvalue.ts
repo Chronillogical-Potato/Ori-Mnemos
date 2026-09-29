@@ -27,8 +27,18 @@ import { slugify } from "./slug.js";
 
 // Constants
 const ALPHA = 0.1;
-const DEFAULT_Q = 0.5;
+/**
+ * Initial Q, and the value an unlearned note reports. 0 is the neutral point of
+ * the reward scale (#37): nearly every reward the accumulator paid lay in
+ * [-0.15, 0.6], and at the old 0.5 an EMA toward any typical reward was a
+ * decrease, so retrieval -> update -> lower Q regardless of usefulness.
+ * Measured on a 1,565-note vault: 3,315 of 3,320 updates lowered Q and every
+ * learned note sat below every never-retrieved one.
+ */
+const DEFAULT_Q = 0;
 const DECAY_RATE = 0.007; // half-life ~99 days
+const SLOW_DECAY_Q = 0.3; // well-credited notes keep their value longer
+const FAST_DECAY_Q = 0.05; // barely-credited notes fade faster
 const EXPOSURE_BETA = 0.5;
 
 /**
@@ -52,7 +62,7 @@ export function initQValueTables(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS note_q (
       note_id TEXT PRIMARY KEY,
-      q_value REAL NOT NULL DEFAULT 0.5,
+      q_value REAL NOT NULL DEFAULT 0,
       update_count INTEGER NOT NULL DEFAULT 0,
       exposure_count INTEGER NOT NULL DEFAULT 0,
       reward_sum REAL NOT NULL DEFAULT 0,
@@ -98,9 +108,13 @@ export function initQValueTables(db: Database.Database): void {
 export function getQ(db: Database.Database, noteId: string): number {
   noteId = slugify(noteId);
   const row = db
-    .prepare("SELECT q_value FROM note_q WHERE note_id = ?")
-    .get(noteId) as { q_value: number } | undefined;
-  return row?.q_value ?? DEFAULT_Q;
+    .prepare("SELECT q_value, update_count FROM note_q WHERE note_id = ?")
+    .get(noteId) as { q_value: number; update_count: number } | undefined;
+  // A row created by `incrementExposure` carries the column default, which is
+  // 0.5 in every table created before #37. It is not a learned value, and
+  // reading it as one made the first real update start from the old constant.
+  if (!row || row.update_count === 0) return DEFAULT_Q;
+  return row.q_value;
 }
 
 export function getDecayedQ(db: Database.Database, noteId: string): number {
@@ -127,9 +141,12 @@ function applyDecay(qValue: number, lastUpdated: string): number {
   const daysSince =
     (Date.now() - parseSqlTimestamp(lastUpdated)) / 86_400_000;
 
+  // Tiers on the #37 scale (Q starts at 0 and rises with credit; ~12 straight
+  // forward citations reach 0.7). The old 0.7 / 0.3 cut-offs were set for a
+  // 0.5 start and put nearly every learned note in the fast tier.
   let mult = 1.0;
-  if (qValue >= 0.7) mult = 0.7;
-  else if (qValue <= 0.3) mult = 1.3;
+  if (qValue >= SLOW_DECAY_Q) mult = 0.7;
+  else if (qValue <= FAST_DECAY_Q) mult = 1.3;
 
   return qValue * Math.exp(-DECAY_RATE * mult * daysSince);
 }
@@ -209,7 +226,8 @@ export function getQState(db: Database.Database, noteId: string): QState {
   const learned = row.update_count > 0;
   return {
     noteId: id,
-    q: row.q_value,
+    // Unlearned rows carry the column default (0.5 on pre-#37 tables).
+    q: row.update_count > 0 ? row.q_value : DEFAULT_Q,
     // An un-updated row has no meaningful `last_updated` to decay from: it was
     // stamped when exposure created the row. Decaying it would manufacture a
     // difference between two notes that have both learned nothing.
@@ -357,8 +375,17 @@ export function updateQ(
   }
 
   noteId = slugify(noteId);
-  const oldQ = getQ(db, noteId);
-  const newQ = oldQ + ALPHA * (reward - oldQ);
+  // From the decayed value (#37 review): starting from the stored value let one
+  // small credit restore a note that had decayed for a year to its old peak.
+  const oldQ = getDecayedQ(db, noteId);
+  // Credits are uses, so a credit never lowers Q (#37 review). The EMA pulled a
+  // note at 0.72 down to meet a 0.4 re-recall - a demotion for being used.
+  // Positive rewards approach 1 in proportion to their strength; a negative
+  // reward (only reachable via allowUnsafe) still moves toward it.
+  const newQ =
+    reward >= 0
+      ? oldQ + ALPHA * reward * (1 - oldQ)
+      : oldQ + ALPHA * (reward - oldQ);
 
   db.prepare(
     `
@@ -637,8 +664,9 @@ export function getLearningHealth(db: Database.Database): {
     .all() as { reward_source: string; n: number }[];
   for (const r of sourceRows) bySource[r.reward_source] = r.n;
 
-  // A +1.0 reward is only ever a forward citation (reward.ts). Rounding guards
-  // against float drift through the EMA.
+  // A +1.0 reward is only ever a forward citation (reward.ts), and since #37
+  // no exposure divisor scales it, so it is written as exactly 1.0. Rounding
+  // guards against float drift. Keep in sync with CREDITED_SIGNALS.
   const fc = db
     .prepare("SELECT COUNT(*) as n FROM q_history WHERE ROUND(reward, 6) = 1.0")
     .get() as { n: number };

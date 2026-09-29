@@ -39,6 +39,13 @@ import {
 import { StageTracker } from "../core/stage-tracker.js";
 import type Database from "better-sqlite3";
 import { checkForUpdate, buildAgentNotice, SessionNoticeGate, writeUpdateDecision } from "../core/update-check.js";
+import {
+  getLearningResetStatus,
+  buildLearningResetNotice,
+  applyLearningResetDecision,
+  recordLearningResetShown,
+  MAX_RESET_REMINDERS,
+} from "../core/learning-reset.js";
 
 let vaultDir: string;
 const graphCache = new GraphCache();
@@ -162,6 +169,9 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
   // ─── Retrieval Intelligence: Session lifecycle ───
   const sessionId = crypto.randomUUID();
   const noticeGate = new SessionNoticeGate();
+  // Separate gate: the #37 reset question must not be swallowed by the update
+  // notice (or vice versa) when both are pending in the same session.
+  const resetNoticeGate = new SessionNoticeGate();
   const rewardAccumulator = new SessionRewardAccumulator(sessionId);
   const sessionStageTracker = new StageTracker();
   let sessionQueryFeatures: number[] | null = null;
@@ -429,6 +439,27 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
     }],
   }));
 
+  // ─── #37 learning reset: offered to the agent, never forced ───
+  const attachLearningResetNotice = (payload: Record<string, unknown>): void => {
+    // One status check per session, whatever it finds: the check scans
+    // q_history, and a vault below the offer threshold would otherwise pay
+    // that scan on every ranked query forever.
+    if (!intelligenceDb || !resetNoticeGate.take()) return;
+    try {
+      const status = getLearningResetStatus(intelligenceDb);
+      if (!status.offer) return;
+      // Count first, attach only if counting succeeded: an ask that cannot be
+      // counted (read-only or locked db) must not be shown, or the cap leaks.
+      // The label uses the atomic count, so concurrent servers agree on it.
+      const n = recordLearningResetShown(intelligenceDb);
+      if (n > MAX_RESET_REMINDERS) return;
+      const notice = buildLearningResetNotice({ ...status, timesShown: n - 1 });
+      if (notice) payload.learning_reset_notice = notice;
+    } catch {
+      // Best effort: a notice must never fail the tool carrying it.
+    }
+  };
+
   // ─── Tools ───
 
 
@@ -439,6 +470,7 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
     { budget: z.number().optional().describe("Max lines (default 96)") },
     async ({ budget }) => {
       const payload: Record<string, unknown> = await runWake(vaultDir, budget ?? 96);
+      attachLearningResetNotice(payload);
 
       // First-run detection and onboarding used to live in ori_orient, whose
       // own description said "prefer ori_wake for session start". Removing
@@ -475,6 +507,25 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
     async ({ version, decision }) => {
       await writeUpdateDecision(version, decision);
       return textResult({ success: true, version, decision, note: "Decision recorded; this version will not be asked again." });
+    }
+  );
+
+  // ori_learning_reset — record the user's answer to the #37 reset question
+  server.tool(
+    "ori_learning_reset",
+    "Record the user's answer to Ori's learning-reset question (learning_reset_notice). Call ONLY after the " +
+      "user explicitly answers. decision=accepted clears learned ranking scores (notes are untouched; the " +
+      "database is backed up first). decision=declined keeps them and permanently stops the question. If " +
+      "the user says 'not now', do not call this; the question is raised at most 3 times in total.",
+    { decision: z.enum(["accepted", "declined"]).describe("The user's answer") },
+    async ({ decision }) => {
+      if (!intelligenceDb) return errorResult("no index yet; nothing to reset");
+      try {
+        const result = applyLearningResetDecision(intelligenceDb, intelligenceDbPath, decision);
+        return textResult({ success: true, ...result });
+      } catch (err) {
+        return errorResult(`learning reset failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   );
 
@@ -668,6 +719,9 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
         sessionId,
         sessionStageTracker,
       );
+
+      // #37 reset question, for sessions that skip wake.
+      if (result.success) attachLearningResetNotice(result.data as Record<string, unknown>);
 
       // Once-per-session update notice fallback (sessions that skip orient)
       if (result.success) {

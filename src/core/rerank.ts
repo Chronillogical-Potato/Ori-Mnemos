@@ -50,6 +50,7 @@ const LAMBDA_MATURITY = 200;
 const MAX_CUMULATIVE_BIAS = 3.0;
 const EXCESS_COMPRESSION = 0.3;
 const K2 = 8;
+const Q_SCALE = 0.5;
 
 // --- Z-score normalization ---
 
@@ -83,6 +84,16 @@ export function phaseB(
   queryType: string,
   sessionId: string,
   coldStart: ColdStartOptions = {},
+  /**
+   * Record exposure + retrieval_log for the top K. The ranked-query pipeline
+   * passes false because it records exactly what it RETURNS after archive
+   * filtering and trimming; recording here too counted every returned note
+   * twice (#37 review), doubling exposure-driven effects.
+   */
+  record = true,
+  /** Filled with each returned note's blend inputs, so a caller that records
+   *  retrieval_log itself logs real values rather than the final score. */
+  debugOut?: Map<string, { simNorm: number; qNorm: number; ucb: number }>,
 ): ScoredNote[] {
   if (candidates.length === 0) return [];
 
@@ -96,7 +107,13 @@ export function phaseB(
 
   // Z-score normalize both (CRITICAL — without this lambda is meaningless)
   const simNorm = zNormalize(simRaw);
-  const qNorm = zNormalize(qRaw);
+  // Q is NOT z-scored (#37 review). It already lives on a fixed scale, and
+  // with most candidates unlearned (Q = 0) z-scoring gave one credited note
+  // +sqrt(n-1) (6.24 at n = 40) whatever its value - a Q of 0.017 and 0.9
+  // got the same boost. Centre on the candidate mean, divide by a constant:
+  // Q = 1.0 above an all-zero field is worth about +2 similarity sigmas.
+  const qMean = qRaw.reduce((a, b) => a + b, 0) / (qRaw.length || 1);
+  const qNorm = qRaw.map((q) => (q - qMean) / Q_SCALE);
 
   const results = candidates.map((c, i) => {
     // Lambda blend
@@ -136,7 +153,7 @@ export function phaseB(
   // `exposure_count = 0` unreachable for anything that ever reached phaseB and
   // left the cold-start floor with nothing to find. It also overstated the
   // exposure divisor in reward.ts for notes that were never returned.
-  for (let rank = 0; rank < topK.length; rank++) {
+  for (let rank = 0; record && rank < topK.length; rank++) {
     const r = topK[rank];
     incrementExposure(db, r.title);
     logRetrieval(
@@ -151,6 +168,12 @@ export function phaseB(
       r._phaseB.ucb,
       r.score,
     );
+  }
+
+  if (debugOut) {
+    for (const r of topK) {
+      debugOut.set(r.title, { simNorm: r._phaseB.simNorm, qNorm: r._phaseB.qNorm, ucb: r._phaseB.ucb });
+    }
   }
 
   // Strip internal debug data before returning

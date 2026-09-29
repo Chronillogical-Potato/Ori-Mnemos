@@ -12,6 +12,7 @@ import { loadConfig } from "../core/config.js";
 import { buildIndex, initDB } from "../core/engine.js";
 import type { IndexStats } from "../core/engine.js";
 import { exportLearned, importLearned } from "../core/learned.js";
+import { reapplyLearningResetAfterImport, countLegacyLearning } from "../core/learning-reset.js";
 
 export type DerivedIndexStats = {
   scanned: number;
@@ -235,13 +236,22 @@ export async function runIndexImportLearned(
 
   const db = initDB(dbPath);
   let stats;
+  let reapplied: { added: number; cleared: boolean; backup: string | null } = { added: 0, cleared: false, backup: null };
   try {
+    const before = countLegacyLearning(db);
     stats = importLearned(db, ndjson);
+    reapplied = reapplyLearningResetAfterImport(db, dbPath, before);
   } finally {
     db.close();
   }
 
   const warnings: string[] = [];
+  if (reapplied.cleared) {
+    warnings.push(
+      `imported ${reapplied.added} learning rows scored under the pre-#37 rule; this vault already ` +
+        `accepted the learning reset, so they were cleared again (backup: ${reapplied.backup})`,
+    );
+  }
   if (stats.skippedUnknownTable > 0) {
     warnings.push(
       `${stats.skippedUnknownTable} rows targeted tables this index does not have — ` +

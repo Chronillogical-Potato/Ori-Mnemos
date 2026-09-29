@@ -56,24 +56,54 @@ describe("getQ / updateQ", () => {
   it("updates Q with EMA formula", () => {
     updateQ(db, "note-a", 1.0, "session-1");
     const q = getQ(db, "note-a");
-    // Q = 0.5 + 0.1 * (1.0 - 0.5) = 0.55
-    expect(q).toBeCloseTo(0.55, 10);
+    // Q = 0 + 0.1 * (1.0 - 0) = 0.1
+    expect(q).toBeCloseTo(0.1, 10);
   });
 
   it("accumulates updates correctly", () => {
     updateQ(db, "note-a", 1.0, "s1");
     updateQ(db, "note-a", 1.0, "s1");
     const q = getQ(db, "note-a");
-    // Round 1: 0.5 + 0.1*(1.0-0.5) = 0.55
-    // Round 2: 0.55 + 0.1*(1.0-0.55) = 0.595
-    expect(q).toBeCloseTo(0.595, 10);
+    // Round 1: 0 + 0.1*1.0*(1-0) = 0.1
+    // Round 2: from the decayed 0.1 (seconds of decay, ~1e-8), + 0.1*1.0*(1-0.1) = 0.19
+    expect(q).toBeCloseTo(0.19, 6);
+  });
+
+  // The #37 invariant: from the initial value, any positive reward raises Q
+  // and any negative reward lowers it. Under DEFAULT_Q = 0.5 a reward of 0.3
+  // (a good downstream_creation) lowered Q, so use was punished.
+  it("moves Q in the direction of the reward's sign from the initial value", () => {
+    for (const [id, r] of [["pos-small", 0.02], ["pos-typ", 0.3], ["neg", -0.05]] as const) {
+      updateQ(db, id, r, "s1");
+      expect(Math.sign(getQ(db, id))).toBe(Math.sign(r));
+    }
+  });
+
+  it("getQState agrees with getQ on unlearned legacy rows", () => {
+    db.prepare("INSERT INTO note_q (note_id, q_value, exposure_count) VALUES ('legacy-state', 0.5, 2)").run();
+    expect(getQState(db, "legacy-state").q).toBe(getQ(db, "legacy-state"));
+  });
+
+  it("a credit never lowers Q, however small (#37 review)", () => {
+    for (let i = 0; i < 12; i++) updateQ(db, "cited", 1.0, "s1");
+    const before = getQ(db, "cited");
+    updateQ(db, "cited", 0.4, "s2"); // a re-recall on a well-cited note
+    expect(getQ(db, "cited")).toBeGreaterThanOrEqual(before);
+  });
+
+  it("an exposure-created row is not read as a learned value", () => {
+    // Tables created before #37 give note_q.q_value a column default of 0.5.
+    db.prepare("INSERT INTO note_q (note_id, q_value, exposure_count) VALUES ('legacy-row', 0.5, 3)").run();
+    expect(getQ(db, "legacy-row")).toBe(DEFAULT_Q);
+    updateQ(db, "legacy-row", 1.0, "s1");
+    expect(getQ(db, "legacy-row")).toBeCloseTo(0.1, 10); // started from DEFAULT_Q, not 0.5
   });
 
   it("decreases Q for negative rewards", () => {
     updateQ(db, "note-a", -0.15, "s1");
     const q = getQ(db, "note-a");
-    // Q = 0.5 + 0.1*(-0.15-0.5) = 0.5 - 0.065 = 0.435
-    expect(q).toBeCloseTo(0.435, 10);
+    // Q = 0 + 0.1*(-0.15-0) = -0.015
+    expect(q).toBeCloseTo(-0.015, 10);
   });
 
   it("writes to q_history", () => {
@@ -82,8 +112,8 @@ describe("getQ / updateQ", () => {
       .prepare("SELECT * FROM q_history WHERE note_id = ?")
       .all("note-a") as any[];
     expect(history).toHaveLength(1);
-    expect(history[0].old_q).toBeCloseTo(0.5, 10);
-    expect(history[0].new_q).toBeCloseTo(0.55, 10);
+    expect(history[0].old_q).toBeCloseTo(0, 10);
+    expect(history[0].new_q).toBeCloseTo(0.1, 10);
     expect(history[0].session_id).toBe("session-1");
   });
 });
@@ -97,7 +127,7 @@ describe("getDecayedQ", () => {
     updateQ(db, "note-a", 1.0, "s1");
     // Just updated — daysSince ≈ 0, decay ≈ 1.0
     const decayed = getDecayedQ(db, "note-a");
-    expect(decayed).toBeCloseTo(0.55, 1);
+    expect(decayed).toBeCloseTo(0.1, 2);
   });
 });
 
@@ -189,9 +219,9 @@ describe("batchUpdateQ", () => {
     ]);
     batchUpdateQ(db, rewards, "session-1");
 
-    expect(getQ(db, "note-a")).toBeCloseTo(0.55, 10);
-    expect(getQ(db, "note-b")).toBeCloseTo(0.435, 10);
-    expect(getQ(db, "note-c")).toBeCloseTo(0.5 + 0.1 * (0.5 - 0.5), 10); // stays 0.5
+    expect(getQ(db, "note-a")).toBeCloseTo(0.1, 10);
+    expect(getQ(db, "note-b")).toBeCloseTo(-0.015, 10);
+    expect(getQ(db, "note-c")).toBeCloseTo(0.05, 10);
   });
 });
 

@@ -319,7 +319,7 @@ ori bridge codex --vault ~/brain                       # ~/.codex/config.toml
 ori bridge generic --vault ~/brain                     # prints config for manual setup
 ```
 
-Claude Code, Hermes Agent, and OpenCode get full lifecycle integration — the agent orients at session start, captures insights at session end, and validates notes on write. Cursor, Codex, and other MCP clients get access to all 14 tools but manage their own session lifecycle.
+Claude Code, Hermes Agent, and OpenCode get full lifecycle integration — the agent orients at session start, captures insights at session end, and validates notes on write. Cursor, Codex, and other MCP clients get access to all 15 tools but manage their own session lifecycle.
 
 Manual MCP config (works with any client that speaks MCP):
 
@@ -416,11 +416,9 @@ Notes earn Q-values from session outcomes via exponential moving average updates
 |--------|--------|-----------------|
 | Forward citation | +1.0 | You `[[link]]` a retrieved note in new content |
 | Update after retrieval | +0.5 | You edit a note you just retrieved |
-| Downstream creation | +0.6 | You create a new note after retrieving |
 | Within-session re-recall | +0.4 | Same note surfaces across different queries |
-| Dead end (top-3, no follow-up) | −0.15 | Retrieved in top 3 but nothing follows |
 
-After RRF fusion, Phase B reranks the candidate set with a lambda blend of similarity score and learned Q-value, plus a UCB-Tuned exploration bonus that ensures under-retrieved notes still get discovered. Exposure-aware correction prevents the same notes from dominating every session. A cumulative bias cap (MAX=3.0, compression=0.3) prevents runaway score inflation.
+After RRF fusion, Phase B reranks the candidate set with a lambda blend of similarity score and learned Q-value, plus a UCB-Tuned exploration bonus that ensures under-retrieved notes still get discovered. A cumulative bias cap (MAX=3.0, compression=0.3) prevents runaway score inflation.
 
 ### Layer 2 — Co-Occurrence Edges
 
@@ -453,7 +451,7 @@ All updates happen in a single SQLite transaction at session end, in order: co-o
 ## The Stack
 
 ```
-Layer 6: MCP Server                    14 tools, 5 resources — any agent talks to this
+Layer 6: MCP Server                    15 tools, 5 resources — any agent talks to this
 Layer 5: Recursive Exploration         PPR graph traversal, sub-question decomposition, convergence detection
 Layer 4: Retrieval Intelligence        Q-value reranking, co-occurrence learning, stage meta-optimization
 Layer 3: Dampening Pipeline            gravity, hub, resolution — ablation-validated
@@ -462,7 +460,7 @@ Layer 1: Knowledge Graph + Vitality    wiki-links, ACT-R decay, spreading activa
 Layer 0: Markdown files on disk        git-friendly, human-readable, portable
 ```
 
-14 MCP tools · 5 resources · 19 CLI commands · 874 tests
+15 MCP tools · 5 resources · 19 CLI commands · 874 tests
 
 ---
 

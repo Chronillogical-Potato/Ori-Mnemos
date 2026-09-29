@@ -75,6 +75,24 @@ export const LEARNED_TABLES: LearnedTable[] = [
       "session_id TEXT, timestamp TEXT)",
   },
   {
+    // Archive written by the #37 learning reset. Exported so a restore keeps it.
+    name: "q_history_pre_37",
+    columns: ["note_id", "old_q", "new_q", "reward", "reward_source", "session_id", "timestamp"],
+    orderBy: "timestamp, note_id",
+    ddl:
+      "CREATE TABLE IF NOT EXISTS q_history_pre_37 (id INTEGER, note_id TEXT, old_q REAL, new_q REAL, " +
+      "reward REAL, reward_source TEXT, session_id TEXT, timestamp TEXT)",
+  },
+  {
+    // The #37 learning-reset answer and ask count. Without these a rebuild
+    // (export -> rm .ori -> build -> import) forgot a permanent "no" and reset
+    // the 3-ask cap. Only these keys: the rest of meta is index bookkeeping.
+    name: "meta",
+    columns: ["key", "value"],
+    orderBy: "key",
+    where: "key IN ('learning_reset_37', 'learning_reset_37_shown')",
+  },
+  {
     name: "retrieval_log",
     columns: ["session_id", "query_text", "query_type", "note_id", "rank", "similarity_score", "q_score", "ucb_bonus", "final_score", "timestamp"],
     orderBy: "timestamp, session_id, rank",
@@ -118,6 +136,22 @@ export const LEARNED_TABLES: LearnedTable[] = [
     where: "source = 'retrieval' OR co_retrieval_count > 0",
   },
 ];
+
+/**
+ * Decide whether an imported reset-meta row may overwrite the local one.
+ * A local "declined" is never overwritten; an imported one always wins. The
+ * ask count keeps the larger value, so the cap is a lifetime total.
+ */
+function mergeResetMeta(db: Database.Database, row: Record<string, unknown>): boolean {
+  const key = String(row.key);
+  if (key !== "learning_reset_37" && key !== "learning_reset_37_shown") return false;
+  const local = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
+  if (!local) return true;
+  const incoming = String(row.value ?? "");
+  if (key === "learning_reset_37_shown") return Number(incoming) > Number(local.value);
+  if (local.value.startsWith("declined")) return false;
+  return incoming.startsWith("declined") || !local.value;
+}
 
 function tableExists(db: Database.Database, name: string): boolean {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
@@ -214,6 +248,7 @@ export function importLearned(db: Database.Database, ndjson: string): LearnedImp
       }
       const params: Record<string, unknown> = {};
       for (const c of t.columns) params[c] = rec[c] ?? null;
+      if (name === "meta" && !mergeResetMeta(db, params)) continue;
       st.run(params);
       imported[name] = (imported[name] ?? 0) + 1;
       total++;

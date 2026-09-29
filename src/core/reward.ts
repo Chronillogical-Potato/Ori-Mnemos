@@ -6,8 +6,8 @@
  * Q-values (see qvalue.ts `updateQ`, and the guard in serve.ts).
  *
  * Reward signals (in priority order):
- *   forward citation +1.0 | update +0.5 | downstream creation +0.6
- *   within-session re-recall +0.4 | partial follow-up +0.1 | dead end -0.15
+ *   forward citation +1.0 | update +0.5 | within-session re-recall (distinct queries) +0.4
+ *   reported only, never credited (#37): downstream creation, partial follow-up, dead end, neutral
  *
  * ## Two production defects fixed 2026-08-28
  *
@@ -30,10 +30,14 @@
  * learned value, with `index` (104 exposures) at Q=0.0165 while never-retrieved
  * test fixtures sat at the 0.5 initialization ceiling.
  *
- * The proxy is gone, so the correction is meaningful again — but it is now
- * damped (EXPOSURE_BETA 0.5 -> 0.25) and floored, so it can no longer drive a
- * genuinely useful note toward zero. A note cited 200 times should rank high;
- * it should not be punished for being the answer.
+ * The proxy is gone. The correction was then damped (EXPOSURE_BETA 0.5 -> 0.25)
+ * and floored, and #37 removed it from credit entirely: with an EMA, Q cannot
+ * exceed the recent corrected reward, so dividing by lifetime exposure made the
+ * ceiling fall with use - a note cited every session peaked at Q 0.48 after 20
+ * sessions and sank to 0.20 by 1,000, below a note cited 8 times. A note cited
+ * 200 times should rank high; it should not be punished for being the answer.
+ * Popularity bias is handled where it belongs, in ranking (explorationBonus
+ * damps by exposure, and the cold-start floor surfaces unseen notes).
  */
 
 import type Database from "better-sqlite3";
@@ -41,22 +45,13 @@ import { batchUpdateQ, getExposureCount, type RewardSource } from "./qvalue.js";
 import { slugify } from "./slug.js";
 
 /**
- * Exposure-correction exponent. Lowered from 0.5 on 2026-08-28.
- *
- * At 0.5 a note with 300 exposures divides its reward by 17.3, which turned a
- * full +1.0 forward citation into +0.058 — below the noise floor of the rank
- * proxy that was running at the time. At 0.25 the same note divides by 4.16:
- * still a real correction for popularity bias, no longer an erasure.
+ * Signals that are written to note_q. Everything else is reported only.
+ * downstream_creation is reported only (#37 review): it fired for every
+ * retrieved note whenever anything was created, linked or not - "retrieved
+ * alongside" at up to 0.6, above an actual update. A created note that links
+ * a retrieved one is already a forward_citation.
  */
-const EXPOSURE_BETA = 0.25;
-
-/**
- * Floor on the exposure divisor's effect. Even an extremely over-exposed note
- * retains 20% of its earned reward, so a strong repeated signal can still
- * accumulate. Without a floor the correction is unbounded in exposure and any
- * sufficiently central note is guaranteed to decay to zero.
- */
-const MIN_EXPOSURE_RETENTION = 0.2;
+const CREDITED_SIGNALS = new Set<string>(["forward_citation", "update", "re_recall"]);
 
 export interface RetrievalEvent {
   noteId: string;
@@ -134,10 +129,16 @@ export class SessionRewardAccumulator {
     const breakdown: RewardBreakdown[] = [];
     const seen = new Map<string, number[]>();
 
+    // Re-recall means distinct queries (#37 review): a retry or second page
+    // of the same query logged the note twice and paid 0.4 without use.
+    const queries = new Map<string, Set<string>>();
     for (const r of this.retrievals) {
       const ranks = seen.get(r.noteId) ?? [];
       ranks.push(r.rank);
       seen.set(r.noteId, ranks);
+      const qs = queries.get(r.noteId) ?? new Set<string>();
+      qs.add(r.queryText.trim().toLowerCase());
+      queries.set(r.noteId, qs);
     }
 
     for (const [noteId, ranks] of seen) {
@@ -154,8 +155,10 @@ export class SessionRewardAccumulator {
       } else if (outcome.createdNotes.length > 0) {
         reward = 0.6 * (1 / Math.log2(bestRank + 2));
         signal = "downstream_creation";
-      } else if (ranks.length > 1) {
-        reward = 0.4 * (1 / ranks.length);
+      } else if (queries.get(noteId)!.size > 1) {
+        // Constant: coming back to a note more often in one session is not
+        // weaker evidence. 0.4 / count paid a note recalled 5 times 0.08.
+        reward = 0.4;
         signal = "re_recall";
       } else if (
         outcome.forwardCitations.length > 0 ||
@@ -164,9 +167,12 @@ export class SessionRewardAccumulator {
         reward = 0.1 / Math.log2(bestRank + 2);
         signal = "partial_follow_up";
       } else if (bestRank <= 2) {
-        // IPS-debiased dead end: only the top 3 are assumed to have been read,
-        // so only they can be blamed for not being useful.
-        reward = -0.15 / Math.pow(bestRank + 1, 1.0);
+        // Dead end: a top-3 note the session never visibly used. Reported, not
+        // credited (#37 review). "Read and answered from, but not cited" looks
+        // identical to "read and useless", so a penalty here demoted notes for
+        // being read - the #37 sign on a smaller scale. It needs a real
+        // not-useful signal before it can be a verdict.
+        reward = 0;
         signal = "dead_end";
       } else {
         reward = 0;
@@ -174,19 +180,18 @@ export class SessionRewardAccumulator {
       }
 
       const rawReward = reward;
+      // Reported in the breakdown; no longer divides credit (#37, see header).
       const exposure = getExposureCount(db, noteId);
 
-      // Exposure correction, damped and floored. Penalties are exempt: dividing
-      // a dead-end penalty by exposure would make popular notes progressively
-      // harder to demote, which is the same rich-get-richer trap in reverse.
-      if (exposure > 1 && reward > 0) {
-        const divisor = Math.pow(exposure, EXPOSURE_BETA);
-        const retained = Math.max(1 / divisor, MIN_EXPOSURE_RETENTION);
-        reward = reward * retained;
-      }
-
       const finalReward = Math.max(-1, Math.min(1, reward));
-      credits.set(noteId, finalReward);
+      // Only signals that say the note was USED reach note_q (#37):
+      //   - neutral: no signal. Written as 0 it pulled Q down (2,604 of 3,320
+      //     updates on one vault).
+      //   - dead_end: read-but-not-cited is indistinguishable from useless.
+      //   - partial_follow_up: "retrieved alongside the note that was cited"
+      //     paid <= 0.1, which an EMA reads as a demotion for any note above it.
+      // They stay in the breakdown so the signal mix is still reported.
+      if (CREDITED_SIGNALS.has(signal)) credits.set(noteId, finalReward);
       breakdown.push({
         noteId,
         reward: finalReward,
@@ -294,4 +299,3 @@ export class SessionRewardAccumulator {
   }
 }
 
-export { EXPOSURE_BETA, MIN_EXPOSURE_RETENTION };

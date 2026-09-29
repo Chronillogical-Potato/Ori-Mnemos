@@ -24,6 +24,7 @@ import { buildGraphologyGraph, personalizedPageRank } from "./importance.js";
 import { parseFrontmatter } from "./frontmatter.js";
 import type { LlmProvider, ChatMessage } from "./llm.js";
 import { NullProvider } from "./llm.js";
+import { DEFAULT_Q } from "./qvalue.js";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -66,7 +67,7 @@ export interface ExploreOutput {
  * Compute PPR seed weight for a note, blending retrieval score with
  * warmth activation and learned Q-value.
  *
- * Formula: base + (warmth_blend * warmth) + (q_blend * (q - 0.5))
+ * Formula: base + (warmth_blend * warmth) + (q_blend * (q - DEFAULT_Q))
  * Floor: 0.01
  */
 export function computeExploreSeedWeight(
@@ -77,7 +78,8 @@ export function computeExploreSeedWeight(
 ): number {
   const base = retrievalScore;
   const warmthBoost = warmthScore !== null ? config.warmth_seed_blend * warmthScore : 0;
-  const qBoost = config.q_seed_blend * (qValue - 0.5);
+  // Centred on the unlearned value, not a literal: unlearned notes get no boost (#37).
+  const qBoost = config.q_seed_blend * (qValue - DEFAULT_Q);
   return Math.max(0.01, base + warmthBoost + qBoost);
 }
 

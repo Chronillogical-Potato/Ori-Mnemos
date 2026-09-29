@@ -68,6 +68,7 @@ describe("tools listing", () => {
       "ori_explore",
       "ori_health",
       "ori_index_build",
+      "ori_learning_reset",
       "ori_promote",
       "ori_prune",
       "ori_query_ranked",
