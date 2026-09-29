@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   computePromotion,
   injectFooters,
+  stripTemplatePlaceholderLines,
   isTemplatePlaceholder,
   resolveAreas,
   type PromoteInput,
@@ -258,6 +259,38 @@ describe("injectFooters", () => {
   it("returns clean body when no areas or links", () => {
     const result = injectFooters("Just body.", [], []);
     expect(result.trim()).toBe("Just body.");
+  });
+});
+
+describe("placeholder handling (#38)", () => {
+  it("promote keeps footer links the user wrote, placeholder-named or not", () => {
+    const body = "Body.\n\nRelevant Notes:\n- [[related note]]\n\nAreas:\n- [[relevant map]]";
+    const result = injectFooters(body, ["index"], []);
+    expect(result).toContain("[[related note]]");
+    expect(result).toContain("[[relevant map]]");
+    expect(result).toContain("[[index]]");
+  });
+
+  it("stripTemplatePlaceholderLines removes only the two template lines", () => {
+    const tpl = "# {t}\n\nRelevant Notes:\n- [[related note]] -- why this connection matters\n- [[kept]]\n\nAreas:\n- [[Relevant Map]]\r\n";
+    const out = stripTemplatePlaceholderLines(tpl);
+    expect(out).not.toMatch(/related note|relevant map/i);
+    expect(out).toContain("- [[kept]]");
+    expect(out).toContain("Relevant Notes:");
+    expect(out).toContain("Areas:");
+  });
+});
+
+describe("shipped note template (#38)", () => {
+  it("contains no wikilinks, so a note made from it links to nothing that does not exist", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const path = await import("node:path");
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const tpl = readFileSync(path.join(root, "scaffold", "templates", "note.md"), "utf8");
+    expect(tpl.match(/\[\[[^\]]+\]\]/g)).toBeNull();
+    expect(tpl).toContain("Relevant Notes:");
+    expect(tpl).toContain("Areas:");
   });
 });
 

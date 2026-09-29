@@ -14,6 +14,8 @@ import { computeVitality } from "../core/vitality.js";
 import { initDB } from "../core/engine.js";
 import { getLearningHealth } from "../core/qvalue.js";
 import { llmKeyProblem } from "../core/llm.js";
+import { TEMPLATE_PLACEHOLDER_LINKS } from "../core/promote.js";
+import { slugify } from "../core/slug.js";
 
 export type HealthResult = {
   success: boolean;
@@ -33,6 +35,22 @@ export async function runHealth(
   const graph = linkGraph ?? await buildGraph(paths.notes);
   const orphans = findOrphans(graph, allNotes);
   const dangling = findDanglingLinks(graph, allNotes);
+
+  // #38: name the cause and the notes instead of leaving mystery dangling
+  // links. Notes are the user's; health explains, it does not edit them.
+  const placeholderSlugs = new Set(TEMPLATE_PLACEHOLDER_LINKS.map((t) => slugify(t)));
+  const templateWarnings: string[] = [];
+  for (const d of dangling) {
+    if (!placeholderSlugs.has(slugify(d))) continue;
+    const sources = [...(graph.incoming.get(d) ?? [])].sort();
+    const shown = sources.slice(0, 10).join(", ");
+    const more = sources.length > 10 ? ` and ${sources.length - 10} more` : "";
+    templateWarnings.push(
+      `[[${d}]] is likely a placeholder link from an older version of the note template, not a ` +
+        `missing note. Found in ${sources.length} note(s): ${shown}${more}. If you did not write it, ` +
+        "delete that link line (and from templates/note.md if it is still there). New notes no longer get it.",
+    );
+  }
 
   const schemaViolations: { note: string; errors: string[] }[] = [];
   const fading: { note: string; vitality: number }[] = [];
@@ -164,6 +182,6 @@ export async function runHealth(
       fading,
       ...(learning ? { learning } : {}),
     },
-    warnings: [...configWarnings, ...learningWarnings],
+    warnings: [...templateWarnings, ...configWarnings, ...learningWarnings],
   };
 }

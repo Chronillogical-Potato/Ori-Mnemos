@@ -55,7 +55,5 @@ created: YYYY-MM-DD
 ---
 
 Relevant Notes:
-- [[related note]] -- why this connection matters
 
 Areas:
-- [[relevant map]]

@@ -49,6 +49,30 @@ const AUTO_APPLY_THRESHOLD = 0.8;
 
 const FOOTER_HEADINGS = ["Relevant Notes", "Areas"] as const;
 
+/**
+ * Placeholder links shipped by the note template before #38. Vaults created
+ * earlier keep their own copy of the template; `ori add` strips these lines
+ * from that template text before any user content goes in. Promote does NOT
+ * filter them: at promote time a template line cannot be told from one the
+ * user wrote, and user links are never removed.
+ */
+export const TEMPLATE_PLACEHOLDER_LINKS = ["related note", "relevant map"] as const;
+
+/**
+ * Remove the pre-#38 placeholder lines from TEMPLATE text (`- [[related note]]
+ * -- ...`, `- [[relevant map]]`). Headings stay. Call this only on template
+ * text, never on a body that contains user content.
+ */
+export function stripTemplatePlaceholderLines(templateText: string): string {
+  return templateText
+    .split("\n")
+    .filter((line) => {
+      const m = line.trim().match(/^-\s+\[\[([^\]|#]+)\]\]/);
+      return !(m && (TEMPLATE_PLACEHOLDER_LINKS as readonly string[]).includes(m[1]!.trim().toLowerCase()));
+    })
+    .join("\n");
+}
+
 const TEMPLATE_PLACEHOLDER = /\{Content\s*[-—]/;
 
 /**

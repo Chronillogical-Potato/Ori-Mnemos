@@ -5,6 +5,7 @@ import { loadConfig, resolveTemplatePath } from "../core/config.js";
 import { parseFrontmatter, stringifyFrontmatter } from "../core/frontmatter.js";
 import { runValidate } from "./validate.js";
 import { runPromote } from "./promote.js";
+import { stripTemplatePlaceholderLines } from "../core/promote.js";
 import { slugify } from "../core/slug.js";
 import { initDB, indexNote } from "../core/engine.js";
 import { buildGraph } from "../core/graph.js";
@@ -60,7 +61,12 @@ export async function runAdd(options: AddOptions): Promise<AddResult> {
   const templatePath = resolveTemplatePath(config, vaultRoot, type);
   const templateContent = await fs.readFile(templatePath, "utf8");
   const templateParsed = parseFrontmatter(templateContent);
-  const templateBody = templateParsed.body;
+  // Vaults created before #38 have placeholder links in their own template
+  // copy. Strip them from the TEMPLATE text only, before the user's title and
+  // content go in, so a line the user wrote is never touched. Unconditional:
+  // the line comes from the template, so even if a real note has that name,
+  // linking every new note to it would be wrong.
+  const templateBody = stripTemplatePlaceholderLines(templateParsed.body);
 
   const now = new Date();
   const created = now.toISOString().slice(0, 10);
