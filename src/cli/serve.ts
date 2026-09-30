@@ -220,24 +220,59 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
     `);
   }
 
+  /** Scoring-rule version stamped on checkpoints; see applyAbandonedCheckpoints. */
+  const CHECKPOINT_RULE = 37;
+
   const applyAbandonedCheckpoints = (): void => {
     if (!intelligenceDb) return;
     try {
+      // A live server rewrites its checkpoint every 60 s, so one touched in the
+      // last 5 minutes may belong to another process still running on this
+      // vault; applying it here and again at that process's own flush credited
+      // the session twice. It is picked up at a later start once stale.
       const rows = intelligenceDb
-        .prepare("SELECT session_id, rewards_json FROM session_checkpoint WHERE session_id != ?")
+        .prepare(
+          `SELECT session_id, rewards_json FROM session_checkpoint
+            WHERE session_id != ? AND updated_at < datetime('now', '-5 minutes')`,
+        )
         .all(sessionId) as { session_id: string; rewards_json: string }[];
       let recovered = 0;
       for (const row of rows) {
+        let parsed: { rule?: number; rewards?: Record<string, number> };
         try {
-          const rewards = new Map<string, number>(Object.entries(JSON.parse(row.rewards_json)));
-          if (rewards.size > 0) {
-            batchUpdateQ(intelligenceDb, rewards, row.session_id);
-            recovered += rewards.size;
-          }
+          parsed = JSON.parse(row.rewards_json);
         } catch {
-          // A corrupt row must not block the others or the server start.
+          // Corrupt row: drop it so it cannot block every future start.
+          intelligenceDb.prepare("DELETE FROM session_checkpoint WHERE session_id = ?").run(row.session_id);
+          continue;
         }
-        intelligenceDb.prepare("DELETE FROM session_checkpoint WHERE session_id = ?").run(row.session_id);
+        try {
+          // Checkpoints carry the scoring rule they were computed under. A
+          // bare map is from a build before the #37 follow-up: its rewards were
+          // computed under the defective rules (dead-end penalties, neutral
+          // zeros) and replaying them now would stamp them as fixed-rule
+          // learning (note_q.rule = 1). Those are discarded, not applied.
+          const rewards = new Map<string, number>(
+            parsed.rule === CHECKPOINT_RULE ? Object.entries(parsed.rewards ?? {}) : [],
+          );
+          // Apply and delete in ONE transaction, as the session-end flush does:
+          // apart, a crash between them replayed the checkpoint at the next
+          // start, and a failed apply followed by a successful delete lost it.
+          // The re-check of the row inside the transaction stops two
+          // processes recovering the same checkpoint from both applying it.
+          const db = intelligenceDb;
+          db.transaction(() => {
+            const still = db.prepare("DELETE FROM session_checkpoint WHERE session_id = ?").run(row.session_id);
+            if (still.changes === 0) return; // another process got it first
+            if (rewards.size > 0) {
+              batchUpdateQ(db, rewards, row.session_id);
+              recovered += rewards.size;
+            }
+          })();
+        } catch {
+          // Transient failure: the transaction rolled back and the row is
+          // still there for the next start. Never block the server.
+        }
       }
       if (recovered > 0) {
         process.stderr.write(
@@ -262,7 +297,7 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
            ON CONFLICT(session_id) DO UPDATE SET
              rewards_json = excluded.rewards_json, updated_at = excluded.updated_at`,
         )
-        .run(sessionId, JSON.stringify(Object.fromEntries(rewards)));
+        .run(sessionId, JSON.stringify({ rule: CHECKPOINT_RULE, rewards: Object.fromEntries(rewards) }));
     } catch {
       // Best effort. A failed checkpoint costs this session's learning, not the
       // server.

@@ -1,7 +1,7 @@
 /**
  * Q-value storage, update, decay, and exploration bonus.
  * Layer 1 of retrieval intelligence — learns which notes are useful
- * via exponential moving average Q-updates with UCB-Tuned exploration.
+ * via exponential moving average Q-updates with an exposure-damped exploration bonus.
  *
  * Research: MemRL, Drift, Tempera, bandit theory (63-source synthesis)
  *
@@ -101,6 +101,103 @@ export function initQValueTables(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_retrieval_session ON retrieval_log(session_id);
     CREATE INDEX IF NOT EXISTS idx_retrieval_note ON retrieval_log(note_id);
   `);
+  migrateRuleColumn(db);
+}
+
+/**
+ * Add `note_q.rule` and classify the rows that existed before it.
+ *
+ * `rule = 1` marks Q learned under the fixed #37 rules; only `updateQ` writes
+ * it. Anything else with `update_count > 0` - 0.7.0 rows, and rows restored by
+ * `import-learned` from an export that predates the column (NULL) - is legacy.
+ * A marker on the row, not an inference from q_history, because import
+ * REPLACES note_q rows but APPENDS q_history: history cannot say which rule
+ * produced the value currently in the row (Codex review, two reproductions).
+ *
+ * One-time classification of existing rows: fixed-rule learning always begins
+ * with a transition from exactly 0 (DEFAULT_Q), which the old EMA from 0.5
+ * never produces, so a row is fixed-rule if its history has such a transition
+ * and no old-rule start. Unreleased builds are the only source of those rows.
+ * The ALTER runs inside the transaction, so of two processes opening the same
+ * vault only one can classify.
+ *
+ * Exported because some entry points open the database without
+ * initQValueTables: `ori health` (the new queries need the column) and
+ * `index export-learned` / `import-learned`, where importing into an
+ * unmigrated table would silently drop incoming `rule` values and then let
+ * this classification re-infer them from mixed history (Codex review).
+ */
+export function migrateRuleColumn(db: Database.Database): void {
+  const cols = db.prepare("PRAGMA table_info(note_q)").all() as { name: string }[];
+  // No note_q yet: nothing to migrate, and not this function's job to create it
+  // (import-learned deliberately refuses to invent tables).
+  if (cols.length === 0 || cols.some((c) => c.name === "rule")) return;
+  try {
+    db.transaction(() => {
+      db.exec("ALTER TABLE note_q ADD COLUMN rule INTEGER DEFAULT 0");
+      // No history, nothing to classify from: every learned row stays legacy.
+      const hasHistory = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'q_history'").get();
+      if (hasHistory) db.exec(`
+        UPDATE note_q SET rule = 1
+         WHERE update_count > 0
+           AND EXISTS (SELECT 1 FROM q_history h WHERE h.note_id = note_q.note_id AND h.old_q = 0)
+           AND NOT EXISTS (SELECT 1 FROM q_history h WHERE h.note_id = note_q.note_id AND h.old_q = 0.5)
+      `);
+    })();
+  } catch (err) {
+    // Another process added it between the check and the ALTER.
+    if (!/duplicate column/i.test(String(err))) throw err;
+  }
+}
+
+// --- Legacy (pre-#37) learning ---
+
+/**
+ * Notes whose Q was learned under the pre-#37 rules: learned, and not marked
+ * `rule = 1` (see migrateRuleColumn).
+ *
+ * These values are IGNORED at read time rather than deleted. Measured on a
+ * 1,566-note vault: 1,085 legacy notes averaging Q = 0.373, built from 3,320
+ * updates of which not one was a forward citation or an update signal - so
+ * they encode how often a note was retrieved, not whether it helped. On the
+ * fixed scale one forward citation is worth 0.1, so leaving them live let the
+ * noise outrank every new credit, for every user who declined or never saw
+ * the opt-in reset. The rows and history stay on disk; the opt-in reset can
+ * still archive them.
+ */
+export const LEGACY_NOTES_SQL =
+  "SELECT note_id FROM note_q WHERE update_count > 0 AND COALESCE(rule, 0) = 0";
+
+/** SQL expression, true when note_q row `alias` holds legacy learning. */
+const IS_LEGACY = (alias: string) =>
+  `(${alias}.update_count > 0 AND COALESCE(${alias}.rule, 0) = 0)`;
+
+/**
+ * Move one note's legacy history into `q_history_pre_37` and clear its learned
+ * columns, so a new credit starts from 0 instead of on top of legacy state.
+ * Called by `updateQ` the first time a legacy note earns fixed-rule credit.
+ * Same archive table and columns as the opt-in reset in learning-reset.ts.
+ */
+function retireLegacyNote(db: Database.Database, noteId: string): void {
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS q_history_pre_37 (
+        id INTEGER, note_id TEXT, old_q REAL, new_q REAL,
+        reward REAL, reward_source TEXT, session_id TEXT, timestamp TEXT
+      )
+    `);
+    db.prepare(
+      `INSERT INTO q_history_pre_37
+         SELECT id, note_id, old_q, new_q, reward, reward_source, session_id, timestamp
+           FROM q_history WHERE note_id = ?`,
+    ).run(noteId);
+    db.prepare("DELETE FROM q_history WHERE note_id = ?").run(noteId);
+    db.prepare(
+      `UPDATE note_q SET q_value = 0, update_count = 0, reward_sum = 0,
+              reward_sq_sum = 0, last_reward = NULL
+        WHERE note_id = ?`,
+    ).run(noteId);
+  })();
 }
 
 // --- Read ---
@@ -108,12 +205,15 @@ export function initQValueTables(db: Database.Database): void {
 export function getQ(db: Database.Database, noteId: string): number {
   noteId = slugify(noteId);
   const row = db
-    .prepare("SELECT q_value, update_count FROM note_q WHERE note_id = ?")
-    .get(noteId) as { q_value: number; update_count: number } | undefined;
+    .prepare(
+      `SELECT q_value, update_count, ${IS_LEGACY("q")} AS legacy
+         FROM note_q q WHERE note_id = ?`,
+    )
+    .get(noteId) as { q_value: number; update_count: number; legacy: number } | undefined;
   // A row created by `incrementExposure` carries the column default, which is
   // 0.5 in every table created before #37. It is not a learned value, and
   // reading it as one made the first real update start from the old constant.
-  if (!row || row.update_count === 0) return DEFAULT_Q;
+  if (!row || row.update_count === 0 || row.legacy) return DEFAULT_Q;
   return row.q_value;
 }
 
@@ -121,17 +221,19 @@ export function getDecayedQ(db: Database.Database, noteId: string): number {
   noteId = slugify(noteId);
   const row = db
     .prepare(
-      "SELECT q_value, update_count, last_updated FROM note_q WHERE note_id = ?",
+      `SELECT q_value, update_count, last_updated, ${IS_LEGACY("q")} AS legacy
+         FROM note_q q WHERE note_id = ?`,
     )
     .get(noteId) as
-    | { q_value: number; update_count: number; last_updated: string }
+    | { q_value: number; update_count: number; last_updated: string; legacy: number }
     | undefined;
 
   // No row, or a row created by `incrementExposure` and never rewarded: there
   // is no learned value to decay. Decaying the initialisation constant made
   // `q_reranking` order notes by when exposure happened to create their row,
-  // which is noise wearing a learned score's clothes.
-  if (!row || row.update_count === 0) return DEFAULT_Q;
+  // which is noise wearing a learned score's clothes. Legacy rows likewise
+  // carry no usable value (see LEGACY_NOTES_SQL).
+  if (!row || row.update_count === 0 || row.legacy) return DEFAULT_Q;
 
   return applyDecay(row.q_value, row.last_updated);
 }
@@ -185,6 +287,9 @@ export interface QState {
   updateCount: number;
   exposureCount: number;
   learned: boolean;
+  /** Learned under the pre-#37 rules and ignored (see LEGACY_NOTES_SQL).
+   *  `learned` is false for these; `updateCount` still reports the stored count. */
+  legacy: boolean;
   lastUpdated: string | null;
 }
 
@@ -199,8 +304,9 @@ export function getQState(db: Database.Database, noteId: string): QState {
   const id = slugify(noteId);
   const row = db
     .prepare(
-      `SELECT q_value, update_count, exposure_count, last_updated
-       FROM note_q WHERE note_id = ?`,
+      `SELECT q_value, update_count, exposure_count, last_updated,
+              ${IS_LEGACY("q")} AS legacy
+       FROM note_q q WHERE note_id = ?`,
     )
     .get(id) as
     | {
@@ -208,6 +314,7 @@ export function getQState(db: Database.Database, noteId: string): QState {
         update_count: number;
         exposure_count: number;
         last_updated: string;
+        legacy: number;
       }
     | undefined;
 
@@ -219,15 +326,17 @@ export function getQState(db: Database.Database, noteId: string): QState {
       updateCount: 0,
       exposureCount: 0,
       learned: false,
+      legacy: false,
       lastUpdated: null,
     };
   }
 
-  const learned = row.update_count > 0;
+  const legacy = !!row.legacy;
+  const learned = row.update_count > 0 && !legacy;
   return {
     noteId: id,
     // Unlearned rows carry the column default (0.5 on pre-#37 tables).
-    q: row.update_count > 0 ? row.q_value : DEFAULT_Q,
+    q: learned ? row.q_value : DEFAULT_Q,
     // An un-updated row has no meaningful `last_updated` to decay from: it was
     // stamped when exposure created the row. Decaying it would manufacture a
     // difference between two notes that have both learned nothing.
@@ -235,6 +344,7 @@ export function getQState(db: Database.Database, noteId: string): QState {
     updateCount: row.update_count,
     exposureCount: row.exposure_count,
     learned,
+    legacy,
     lastUpdated: row.last_updated,
   };
 }
@@ -260,8 +370,9 @@ export function getRewardStats(
   noteId = slugify(noteId);
   const row = db
     .prepare(
-      `SELECT update_count, reward_sum, reward_sq_sum, exposure_count
-       FROM note_q WHERE note_id = ?`,
+      `SELECT update_count, reward_sum, reward_sq_sum, exposure_count,
+              ${IS_LEGACY("q")} AS legacy
+       FROM note_q q WHERE note_id = ?`,
     )
     .get(noteId) as
     | {
@@ -269,10 +380,11 @@ export function getRewardStats(
         reward_sum: number;
         reward_sq_sum: number;
         exposure_count: number;
+        legacy: number;
       }
     | undefined;
 
-  if (!row || row.update_count === 0)
+  if (!row || row.update_count === 0 || row.legacy)
     return {
       mean: 0,
       variance: 0.25,
@@ -305,7 +417,11 @@ export function getExposureCount(
 
 export function getTotalQUpdates(db: Database.Database): number {
   const row = db
-    .prepare("SELECT COALESCE(SUM(update_count), 0) as total FROM note_q")
+    // Legacy updates do not count toward the lambda warm-up: they are not
+    // learning the reranker should trust (see LEGACY_NOTES_SQL).
+    .prepare(
+      "SELECT COALESCE(SUM(update_count), 0) as total FROM note_q WHERE rule = 1",
+    )
     .get() as { total: number };
   return row.total;
 }
@@ -375,13 +491,22 @@ export function updateQ(
   }
 
   noteId = slugify(noteId);
+  // First fixed-rule credit on a note with legacy learning: archive the legacy
+  // history and start from 0, or this note would stay classified as legacy
+  // (and ignored) forever, with reward sums mixing both rule sets.
+  const legacy = db
+    .prepare(`SELECT 1 FROM note_q q WHERE note_id = ? AND ${IS_LEGACY("q")}`)
+    .get(noteId);
+  if (legacy) retireLegacyNote(db, noteId);
   // From the decayed value (#37 review): starting from the stored value let one
   // small credit restore a note that had decayed for a year to its old peak.
   const oldQ = getDecayedQ(db, noteId);
   // Credits are uses, so a credit never lowers Q (#37 review). The EMA pulled a
   // note at 0.72 down to meet a 0.4 re-recall - a demotion for being used.
   // Positive rewards approach 1 in proportion to their strength; a negative
-  // reward (only reachable via allowUnsafe) still moves toward it.
+  // reward still moves toward it. The accumulator no longer produces negative
+  // credits, and checkpoints written under the old rules are discarded on
+  // recovery (serve.ts), but this function does not itself refuse them.
   const newQ =
     reward >= 0
       ? oldQ + ALPHA * reward * (1 - oldQ)
@@ -389,9 +514,10 @@ export function updateQ(
 
   db.prepare(
     `
-    INSERT INTO note_q (note_id, q_value, update_count, reward_sum, reward_sq_sum, last_updated, last_reward)
-    VALUES (?, ?, 1, ?, ?, datetime('now'), ?)
+    INSERT INTO note_q (note_id, q_value, update_count, reward_sum, reward_sq_sum, last_updated, last_reward, rule)
+    VALUES (?, ?, 1, ?, ?, datetime('now'), ?, 1)
     ON CONFLICT(note_id) DO UPDATE SET
+      rule = 1,
       q_value = ?,
       update_count = update_count + 1,
       reward_sum = reward_sum + ?,
@@ -466,7 +592,7 @@ export function logRetrieval(
   );
 }
 
-// --- Exploration: UCB-Tuned ---
+// --- Exploration ---
 
 /**
  * Exposure damping factor for the exploration bonus, in [MIN_EXPLORE_RETENTION, 1].
@@ -483,7 +609,7 @@ export function exposureDamping(exposure: number): number {
 }
 
 /**
- * UCB-Tuned exploration bonus, damped by how often the note was already shown.
+ * Exploration bonus, damped by how often a never-credited note was already shown.
  *
  * ## Why exposure enters here (fix list item 8, 2026-09-15)
  *
@@ -501,8 +627,31 @@ export function exposureDamping(exposure: number): number {
  * it that could preempt it: the 2026-09-12 stage starvation bug was precisely
  * a short-circuit evaluated before the mechanism that guarantees recovery.
  *
- * `stats.exposure` is optional. Omitted means "no exposure information", damps
- * nothing, and reproduces the previous value exactly.
+ * `stats.exposure` is optional. Omitted means "no exposure information" and
+ * damps nothing.
+ *
+ * ## Exposure damps only notes never credited (#37 follow-up)
+ *
+ * This used to be UCB-Tuned: `c * 2.5` at zero credits, then a variance term
+ * shrinking with `count` from the first credit on. The first credit cut the
+ * bonus roughly in half while adding only ALPHA * reward of Q, so a note that
+ * was used ranked BELOW an equally-shown note that was not - the #37
+ * inversion again, through this term instead of DEFAULT_Q.
+ *
+ * Two intermediate fixes failed review for the same reason one step removed:
+ * damping every exposure, then damping `exposure - count`. Exposure is counted
+ * per query and credit per session (at most one per note), so normal use -
+ * shown in two queries, re-recalled once - still left "unused" exposure that
+ * one credit could not repay, and a used note lost to a never-shown equal
+ * match (Codex review, reproduced with the real accumulator).
+ *
+ * The bonus exists to rescue notes that keep being shown and ignored. Once a
+ * note has earned a credit, its exposures are not evidence against it, so it
+ * keeps the full bonus - the same as an unseen note - and Q decides between
+ * them. A credit therefore never lowers the bonus, and a used note always
+ * outscores an equally relevant unseen one. Uncredited notes, including legacy
+ * rows (count 0), are damped by exposure as fix-list item 8 requires.
+ * `mean`, `variance` and `totalQueries` are ignored.
  */
 export function explorationBonus(
   stats: {
@@ -511,14 +660,11 @@ export function explorationBonus(
     count: number;
     exposure?: number;
   },
-  totalQueries: number,
+  _totalQueries: number,
   c: number = 0.2,
 ): number {
-  const damp = exposureDamping(stats.exposure ?? 0);
-  if (stats.count === 0) return c * 2.5 * damp;
-  const logT = Math.log(totalQueries + 1);
-  const V = stats.variance + Math.sqrt((2 * logT) / stats.count);
-  return c * Math.sqrt((logT / stats.count) * Math.min(0.25, V)) * damp;
+  if (stats.count > 0) return c * 2.5;
+  return c * 2.5 * exposureDamping(stats.exposure ?? 0);
 }
 
 /**
@@ -657,6 +803,8 @@ export function getLearningHealth(db: Database.Database): {
   neverUpdated: number;
   exposedButNeverUpdated: number;
   neverExposed: number;
+  /** Notes whose pre-#37 learning is ignored at read time (LEGACY_NOTES_SQL). */
+  legacyNotes: number;
 } {
   const bySource: Record<string, number> = {};
   const sourceRows = db
@@ -668,18 +816,29 @@ export function getLearningHealth(db: Database.Database): {
   // no exposure divisor scales it, so it is written as exactly 1.0. Rounding
   // guards against float drift. Keep in sync with CREDITED_SIGNALS.
   const fc = db
-    .prepare("SELECT COUNT(*) as n FROM q_history WHERE ROUND(reward, 6) = 1.0")
+    // Legacy notes excluded, because health.ts compares this to totalUpdates:
+    // an ignored legacy citation must not mask zero fresh ones. Approximate
+    // after import-learned, which appends history: a note restored as
+    // fixed-rule can carry older rows here. A diagnostic, not a ranking input.
+    .prepare(
+      `SELECT COUNT(*) as n FROM q_history
+        WHERE ROUND(reward, 6) = 1.0 AND note_id NOT IN (${LEGACY_NOTES_SQL})`,
+    )
     .get() as { n: number };
 
   // Pearson correlation between exposure and learned value. Computed in SQL to
   // avoid pulling the whole table into memory on large vaults.
+  // Legacy rows are excluded: they are ignored by ranking, and their built-in
+  // negative correlation (retrieved more -> pulled toward 0 more) would keep
+  // this warning firing forever on any vault that declined the reset.
   const stats = db
     .prepare(
       `SELECT COUNT(*) n, SUM(exposure_count) sx, SUM(q_value) sy,
               SUM(exposure_count * q_value) sxy,
               SUM(exposure_count * exposure_count) sxx,
               SUM(q_value * q_value) syy
-       FROM note_q WHERE update_count > 0 AND exposure_count > 0`,
+       FROM note_q q WHERE update_count > 0 AND exposure_count > 0
+         AND NOT ${IS_LEGACY("q")}`,
     )
     .get() as Record<string, number>;
   let corr = 0;
@@ -722,6 +881,9 @@ export function getLearningHealth(db: Database.Database): {
     neverUpdated: coverage.never_updated ?? 0,
     exposedButNeverUpdated: coverage.exposed_unlearned ?? 0,
     neverExposed: coverage.never_exposed ?? 0,
+    legacyNotes: (
+      db.prepare(`SELECT COUNT(*) AS n FROM (${LEGACY_NOTES_SQL})`).get() as { n: number }
+    ).n,
   };
 }
 

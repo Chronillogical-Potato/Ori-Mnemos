@@ -111,34 +111,35 @@ describe("phaseB", () => {
     expect(result.length).toBeLessThanOrEqual(K2);
   });
 
-  it("changes ordering when Q-values differ", () => {
+  it("moves scores in the direction Q was learned", () => {
     // note-d: strongly positive Q. note-a: strongly negative.
+    const scoreOf = (d: Database.Database) =>
+      new Map(phaseB(d, candidates, "query", "procedural", "s1", { random: () => 1 }, false).map((r) => [r.title, r.score]));
+
+    const baseDb = new Database(":memory:");
+    initQValueTables(baseDb);
+    const base = scoreOf(baseDb);
+
     for (let i = 0; i < 50; i++) updateQ(db, "note-d", 1.0, "s0");
     for (let i = 0; i < 50; i++) updateQ(db, "note-a", -0.5, "s0");
+    const learned = scoreOf(db);
 
-    const simOnly = [...candidates].sort((x, y) => y.score - x.score).map((c) => c.title);
-    const titles = phaseB(db, candidates, "query", "procedural", "s1").map((r) => r.title);
+    expect(learned.get("note-d")!).toBeGreaterThan(base.get("note-d")!);
+    expect(learned.get("note-a")!).toBeLessThan(base.get("note-a")!);
 
-    // Q must participate in the ordering.
-    expect(titles).not.toEqual(simOnly.slice(0, titles.length));
-    // The top similarity hit carries a strongly negative learned Q and must
-    // lose ground because of it.
-    expect(titles.indexOf("note-a")).toBeGreaterThan(simOnly.indexOf("note-a"));
+    // Deliberately NOT asserted: a rank flip. This fixture's candidates sit
+    // ~0.45 blended units apart, and Q is a bounded nudge (see Q_SCALE in
+    // rerank.ts). The old version of this test did observe a flip, but only
+    // because a credited note lost its flat exploration bonus - the #37
+    // inversion - which the previous comment here documented as "exploration
+    // outweighs a fully-learned positive Q roughly 2:1".
+  });
 
-    // Deliberately NOT asserted: that note-d overtakes note-a. Both signals
-    // are z-normalized, so that flip is scale-free and needs lambda >= 0.427
-    // for this fixture whatever the Q magnitudes -- reachable only via the
-    // deleted +0.15 procedural shift. bench/lambda-sweep.mjs measures
-    // recall@5 significantly down by 0.40 (-0.0048, CI [-0.0067, -0.0037]),
-    // so the old assertion pinned a setting the real query log rejects.
-    //
-    // Also NOT asserted: that note-d rises. It cannot here, and not because
-    // of lambda. phaseB scores blended + ucb, and notes with no Q history
-    // take a flat +0.5 exploration bonus while note-d's whole exploitation
-    // term is lambda * qNorm = 0.25 * 1.2247 = 0.306. Exploration outweighs a
-    // fully-learned positive Q roughly 2:1 at this maturity. That is UCB
-    // working as written, but it means a note cannot climb on learned value
-    // alone while any unexplored candidate is in the set.
+  it("keepTail returns every candidate, reranked, so the caller can filter then trim", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ title: `note-${i}`, score: 1 - i * 0.04, signals: {} }));
+    const out = phaseB(db, many, "query", "semantic", "s1", { random: () => 1 }, false, undefined, { k: 10, keepTail: true });
+    expect(out).toHaveLength(20);
+    expect(new Set(out.map((r) => r.title)).size).toBe(20);
   });
 
   it("respects cumulative bias cap", () => {

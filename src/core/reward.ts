@@ -152,14 +152,18 @@ export class SessionRewardAccumulator {
       } else if (outcome.updatedNotes.includes(noteId)) {
         reward = 0.5;
         signal = "update";
-      } else if (outcome.createdNotes.length > 0) {
-        reward = 0.6 * (1 / Math.log2(bestRank + 2));
-        signal = "downstream_creation";
       } else if (queries.get(noteId)!.size > 1) {
         // Constant: coming back to a note more often in one session is not
         // weaker evidence. 0.4 / count paid a note recalled 5 times 0.08.
+        //
+        // Checked BEFORE downstream_creation (#37 follow-up, Codex review):
+        // since #37 downstream_creation is report-only, so while it came first
+        // any session that wrote an unrelated note lost every re-recall credit.
         reward = 0.4;
         signal = "re_recall";
+      } else if (outcome.createdNotes.length > 0) {
+        reward = 0.6 * (1 / Math.log2(bestRank + 2));
+        signal = "downstream_creation";
       } else if (
         outcome.forwardCitations.length > 0 ||
         outcome.updatedNotes.length > 0

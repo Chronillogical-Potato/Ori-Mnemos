@@ -57,7 +57,10 @@ interface LearnedTable {
 export const LEARNED_TABLES: LearnedTable[] = [
   {
     name: "note_q",
-    columns: ["note_id", "q_value", "update_count", "exposure_count", "reward_sum", "reward_sq_sum", "last_updated", "last_reward", "created"],
+    // `rule` marks fixed-#37-rule learning. Exports that predate it restore
+    // NULL, which reads as legacy - correct, since every released build before
+    // it learned under the old rules.
+    columns: ["note_id", "q_value", "update_count", "exposure_count", "reward_sum", "reward_sq_sum", "last_updated", "last_reward", "created", "rule"],
     orderBy: "note_id",
   },
   {
@@ -153,6 +156,13 @@ function mergeResetMeta(db: Database.Database, row: Record<string, unknown>): bo
   return incoming.startsWith("declined") || !local.value;
 }
 
+/** Columns of `t` that `name` actually has, so a table from an older schema
+ *  (no `note_q.rule`) still exports and imports instead of failing the query. */
+function presentColumns(db: Database.Database, name: string, wanted: string[]): string[] {
+  const have = new Set((db.prepare(`PRAGMA table_info("${name}")`).all() as { name: string }[]).map((c) => c.name));
+  return wanted.filter((c) => have.has(c));
+}
+
 function tableExists(db: Database.Database, name: string): boolean {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 }
@@ -177,8 +187,9 @@ export function exportLearned(db: Database.Database): { ndjson: string; stats: L
 
   for (const t of LEARNED_TABLES) {
     if (!tableExists(db, t.name)) continue;
+    const cols = presentColumns(db, t.name, t.columns);
     const sql =
-      `SELECT ${t.columns.map((c) => `"${c}"`).join(", ")} FROM "${t.name}"` +
+      `SELECT ${cols.map((c) => `"${c}"`).join(", ")} FROM "${t.name}"` +
       (t.where ? ` WHERE ${t.where}` : "") +
       ` ORDER BY ${t.orderBy}`;
     const rows = db.prepare(sql).all() as Record<string, unknown>[];
@@ -215,7 +226,7 @@ export function importLearned(db: Database.Database, ndjson: string): LearnedImp
   const createdTables: string[] = [];
   let total = 0;
 
-  const stmts = new Map<string, Database.Statement>();
+  const stmts = new Map<string, { st: Database.Statement; cols: string[] }>();
   const run = db.transaction((lines: string[]) => {
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -238,16 +249,21 @@ export function importLearned(db: Database.Database, ndjson: string): LearnedImp
         db.exec(t.ddl);
         createdTables.push(name);
       }
-      let st = stmts.get(name);
-      if (!st) {
-        st = db.prepare(
-          `INSERT OR REPLACE INTO "${name}" (${t.columns.map((c) => `"${c}"`).join(", ")}) ` +
-            `VALUES (${t.columns.map((c) => `@${c}`).join(", ")})`,
-        );
-        stmts.set(name, st);
+      let prepared = stmts.get(name);
+      if (!prepared) {
+        const cols = presentColumns(db, name, t.columns);
+        prepared = {
+          cols,
+          st: db.prepare(
+            `INSERT OR REPLACE INTO "${name}" (${cols.map((c) => `"${c}"`).join(", ")}) ` +
+              `VALUES (${cols.map((c) => `@${c}`).join(", ")})`,
+          ),
+        };
+        stmts.set(name, prepared);
       }
+      const { st, cols } = prepared;
       const params: Record<string, unknown> = {};
-      for (const c of t.columns) params[c] = rec[c] ?? null;
+      for (const c of cols) params[c] = rec[c] ?? null;
       if (name === "meta" && !mergeResetMeta(db, params)) continue;
       st.run(params);
       imported[name] = (imported[name] ?? 0) + 1;

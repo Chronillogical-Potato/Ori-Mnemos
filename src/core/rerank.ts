@@ -2,7 +2,7 @@
  * Phase B Q-value reranking.
  * Takes the top-k1 candidates from RRF fusion (Phase A) and reranks
  * them using a lambda blend of similarity score and learned Q-value,
- * plus UCB-Tuned exploration bonus, with cumulative bias cap.
+ * plus an exposure-damped exploration bonus, with cumulative bias cap.
  *
  * Research: MemRL two-phase, Drift invariants, CIKM 2024 exposure bias
  */
@@ -13,7 +13,6 @@ import {
   getDecayedQ,
   getRewardStats,
   getTotalQUpdates,
-  getTotalQueryCount,
   explorationBonus,
   incrementExposure,
   logRetrieval,
@@ -22,7 +21,20 @@ import {
 } from "./qvalue.js";
 
 // Constants
-const LAMBDA_MIN = 0.15;
+/**
+ * Was 0.15. Raised with the #37 follow-up: every vault restarts the warm-up
+ * after upgrading (legacy updates no longer count), and at 0.15 the largest Q
+ * contribution (0.15 / Q_SCALE = 0.30) was below the largest exploration gap
+ * (0.425), so for the first 200 credits no amount of use could lift a note over
+ * an equally relevant never-shown one - #37 again, for months, right after the
+ * fix shipped (Codex review, reproduced). 0.3 keeps the cap (0.60) above the
+ * gap from the first query. bench/lambda-sweep.mjs found recall@5 flat from
+ * 0 to 0.35, but it replayed the OLD blend (z-scored Q, no exploration term),
+ * so that range is indicative, not a validation of this formula. The
+ * 1,566-note replay behind this change measured top-10 overlap 96% and the
+ * same #1 in 39/40 queries against Q reranking disabled.
+ */
+const LAMBDA_MIN = 0.3;
 // Measured, not chosen. bench/lambda-sweep.mjs replays 1,653 real query
 // instances from retrieval_log at every lambda in [0, 0.6] -- both blend
 // inputs are logged per candidate, so the re-ranking is exact rather than
@@ -50,6 +62,17 @@ const LAMBDA_MATURITY = 200;
 const MAX_CUMULATIVE_BIAS = 3.0;
 const EXCESS_COMPRESSION = 0.3;
 const K2 = 8;
+/**
+ * Divisor that puts Q on the blend's scale (#37 review).
+ *
+ * Constraint: the largest Q contribution, LAMBDA_MAX / Q_SCALE, must exceed the
+ * largest exploration gap between two candidates, c * 2.5 * (1 -
+ * MIN_EXPLORE_RETENTION) = 0.425 (qvalue.ts explorationBonus). Since credited
+ * notes are no longer exposure-damped, a used note already matches an unseen
+ * one on the bonus and wins on Q; the constraint still governs a used note
+ * against an uncredited note that has been shown less. At 0.5 the cap is 0.70.
+ * 2.0 was tried and let exploration outweigh any amount of use.
+ */
 const Q_SCALE = 0.5;
 
 // --- Z-score normalization ---
@@ -94,11 +117,18 @@ export function phaseB(
   /** Filled with each returned note's blend inputs, so a caller that records
    *  retrieval_log itself logs real values rather than the final score. */
   debugOut?: Map<string, { simNorm: number; qNorm: number; ucb: number }>,
+  /**
+   * `k`: slots the cold-start floor competes for (default K2).
+   * `keepTail`: return every candidate, reranked, instead of only the top k.
+   * The ranked-query pipeline filters archived notes and trims to the
+   * caller's limit AFTER this; truncating here to K2 = 8 capped every
+   * request at 8 results and let archived notes consume those 8 slots.
+   */
+  opts: { k?: number; keepTail?: boolean } = {},
 ): ScoredNote[] {
   if (candidates.length === 0) return [];
 
   const totalUpdates = getTotalQUpdates(db);
-  const totalQueries = getTotalQueryCount(db);
   const lambda = computeLambda(totalUpdates);
 
   // Get raw scores
@@ -111,7 +141,8 @@ export function phaseB(
   // with most candidates unlearned (Q = 0) z-scoring gave one credited note
   // +sqrt(n-1) (6.24 at n = 40) whatever its value - a Q of 0.017 and 0.9
   // got the same boost. Centre on the candidate mean, divide by a constant:
-  // Q = 1.0 above an all-zero field is worth about +2 similarity sigmas.
+  // Q = 1.0 above an all-zero field adds lambda * 2 to the blend (0.70 at
+  // maturity). See Q_SCALE.
   const qMean = qRaw.reduce((a, b) => a + b, 0) / (qRaw.length || 1);
   const qNorm = qRaw.map((q) => (q - qMean) / Q_SCALE);
 
@@ -119,9 +150,11 @@ export function phaseB(
     // Lambda blend
     const blended = (1 - lambda) * simNorm[i] + lambda * qNorm[i];
 
-    // UCB-Tuned exploration bonus
+    // Exploration bonus (exposure-damped for never-credited notes)
     const stats = getRewardStats(db, c.title);
-    const ucb = explorationBonus(stats, totalQueries);
+    // totalQueries is unused by explorationBonus since the #37 follow-up;
+    // counting it scanned all of retrieval_log on every query (~5 ms at 15k rows).
+    const ucb = explorationBonus(stats, 0);
 
     // Raw Phase B score
     let score = blended + ucb;
@@ -146,7 +179,10 @@ export function phaseB(
   // docs/stage-bandit-starvation.md - the recovery mechanism goes above the
   // cutoff, not below it.
   results.sort((a, b) => b.score - a.score);
-  const topK = applyColdStartFloor(db, results, K2, coldStart);
+  const topK = applyColdStartFloor(db, results, opts.k ?? K2, coldStart);
+  const out = opts.keepTail
+    ? [...topK, ...results.filter((r) => !topK.includes(r))]
+    : topK;
 
   // Exposure counts what an agent was actually shown, not what was considered.
   // Before 2026-09-15 this incremented for every candidate, which made
@@ -171,13 +207,13 @@ export function phaseB(
   }
 
   if (debugOut) {
-    for (const r of topK) {
+    for (const r of out) {
       debugOut.set(r.title, { simNorm: r._phaseB.simNorm, qNorm: r._phaseB.qNorm, ucb: r._phaseB.ucb });
     }
   }
 
   // Strip internal debug data before returning
-  return topK.map(({ _phaseB, ...rest }) => rest) as ScoredNote[];
+  return out.map(({ _phaseB, ...rest }) => rest) as ScoredNote[];
 }
 
 // Re-export constants for tests

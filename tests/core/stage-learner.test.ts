@@ -116,6 +116,19 @@ describe("LinUCBStage", () => {
 });
 
 describe("getStageDecision", () => {
+  it("always runs q_reranking, however badly its arm has scored (#37)", () => {
+    // The stage reward measures score shape and term recall, which cannot see
+    // whether a note was used; left to the bandit, the fixed Q was switched
+    // off within 15 queries on a real vault.
+    const config = STAGE_CONFIGS.find((c) => c.id === "q_reranking")!;
+    expect(config.essential).toBe(true);
+    const stage = new LinUCBStage(config);
+    const x = new Array(D).fill(0.1);
+    for (let i = 0; i < 100; i++) stage.update(x, -1);
+    expect(getStageDecision(stage, x, 0, 100, { random: () => 1 })).toBe("run");
+    expect(getStageDecision(stage, x, 10_000, 100, { random: () => 1 })).toBe("run");
+  });
+
   it("always returns 'run' for essential stages", () => {
     const stage = new LinUCBStage(essentialConfig);
     expect(getStageDecision(stage, [0, 0, 0, 0, 0, 0, 0, 0], 0, 100)).toBe("run");

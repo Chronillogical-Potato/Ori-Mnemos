@@ -66,6 +66,43 @@ function count(db: InstanceType<typeof Database>, sql: string): number {
 }
 
 describe("a CLI query learns (fix-list items 5, 9, 10)", () => {
+  it("runs Q reranking like MCP does (#37 follow-up)", async () => {
+    // The phaseB guard also required a caller-supplied sessionId, so every
+    // `ori query ranked` skipped Q reranking and CLI and MCP ranked differently.
+    await runQueryRanked(vault, "agents remember memory", 3);
+    const db = open();
+    try {
+      expect(count(db, "SELECT COUNT(*) c FROM stage_log WHERE stage_id = 'q_reranking' AND decision = 'run'")).toBe(1);
+      // phaseB fills the blend inputs it logs; the exploration bonus is never
+      // 0 for a candidate, so a non-null, non-zero ucb proves phaseB ran.
+      expect(count(db, "SELECT COUNT(*) c FROM retrieval_log WHERE ucb_bonus > 0")).toBeGreaterThan(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("returns the requested number of results, not phaseB's K2 of 8", async () => {
+    const extra = Array.from({ length: 14 }, (_, i) => `memory-note-${i}`);
+    for (const name of extra) {
+      await fs.writeFile(
+        path.join(vault, "notes", `${name}.md`),
+        `---
+description: agents memory recall ${name}
+type: insight
+status: active
+created: 2024-01-01
+---
+
+agents remember memory recall ${name}
+`,
+        "utf8",
+      );
+    }
+    await runIndexBuild(vault, true);
+    const r = await runQueryRanked(vault, "agents remember memory recall", 12);
+    expect(r.data?.results?.length).toBe(12);
+  });
+
   it("records exposure but does not credit Q (#37)", async () => {
     // Item 5 made the CLI credit Q; #37 reversed the credit half. A one-shot
     // query cannot observe a follow-up, so the only rewards it could pay were

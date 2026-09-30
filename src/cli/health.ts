@@ -12,7 +12,7 @@ import { validateNoteAgainstSchema } from "../core/schema.js";
 import { parseFrontmatter } from "../core/frontmatter.js";
 import { computeVitality } from "../core/vitality.js";
 import { initDB } from "../core/engine.js";
-import { getLearningHealth } from "../core/qvalue.js";
+import { getLearningHealth, migrateRuleColumn } from "../core/qvalue.js";
 import { llmKeyProblem } from "../core/llm.js";
 import { TEMPLATE_PLACEHOLDER_LINKS } from "../core/promote.js";
 import { slugify } from "../core/slug.js";
@@ -113,6 +113,9 @@ export async function runHealth(
     await fs.access(dbPath);
     const db = initDB(dbPath);
     try {
+      // health can be the first command after upgrading; its queries need
+      // note_q.rule, and a failure here was reported as "No index yet".
+      migrateRuleColumn(db);
       const h = getLearningHealth(db);
       learning = { ...h };
 

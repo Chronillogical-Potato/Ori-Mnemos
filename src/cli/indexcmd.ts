@@ -12,6 +12,7 @@ import { loadConfig } from "../core/config.js";
 import { buildIndex, initDB } from "../core/engine.js";
 import type { IndexStats } from "../core/engine.js";
 import { exportLearned, importLearned } from "../core/learned.js";
+import { migrateRuleColumn } from "../core/qvalue.js";
 import { reapplyLearningResetAfterImport, countLegacyLearning } from "../core/learning-reset.js";
 
 export type DerivedIndexStats = {
@@ -203,6 +204,7 @@ export async function runIndexExportLearned(
   let ndjson: string;
   let stats;
   try {
+    migrateRuleColumn(db); // so the export carries note_q.rule
     ({ ndjson, stats } = exportLearned(db));
   } finally {
     db.close();
@@ -238,6 +240,9 @@ export async function runIndexImportLearned(
   let stats;
   let reapplied: { added: number; cleared: boolean; backup: string | null } = { added: 0, cleared: false, backup: null };
   try {
+    // Before importing: into an unmigrated note_q the incoming `rule` values
+    // would be dropped, then re-inferred from mixed history by the migration.
+    migrateRuleColumn(db);
     const before = countLegacyLearning(db);
     stats = importLearned(db, ndjson);
     reapplied = reapplyLearningResetAfterImport(db, dbPath, before);
@@ -248,7 +253,7 @@ export async function runIndexImportLearned(
   const warnings: string[] = [];
   if (reapplied.cleared) {
     warnings.push(
-      `imported ${reapplied.added} learning rows scored under the pre-#37 rule; this vault already ` +
+      `imported learning for ${reapplied.added} notes scored under the pre-#37 rule; this vault already ` +
         `accepted the learning reset, so they were cleared again (backup: ${reapplied.backup})`,
     );
   }

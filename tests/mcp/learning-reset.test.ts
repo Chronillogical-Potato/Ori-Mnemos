@@ -17,7 +17,9 @@ afterEach(async () => {
   ctx = null;
 });
 
-async function seededContext(): Promise<{ ctx: McpTestContext; dbPath: string }> {
+async function seededContext(
+  extra?: (db: InstanceType<typeof Database>) => void,
+): Promise<{ ctx: McpTestContext; dbPath: string }> {
   // 1. Start once so init + scaffold exist, then stop.
   const first = await createMcpTestContext();
   const vault = first.vaultDir;
@@ -39,6 +41,7 @@ async function seededContext(): Promise<{ ctx: McpTestContext; dbPath: string }>
     }
     db.prepare("INSERT INTO note_q (note_id, q_value, update_count, exposure_count) VALUES (?,?,6,8)").run(`note-${n}`, q);
   }
+  extra?.(db);
   db.close();
   // 3. Start a server on the seeded vault.
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -146,5 +149,34 @@ describe("#37 learning reset over MCP", () => {
     ctx = await createMcpTestContext();
     const wake = (await callTool(ctx.client, "ori_wake")).parsed as Record<string, unknown>;
     expect(wake).not.toHaveProperty("learning_reset_notice");
+  });
+});
+
+// #37 follow-up (Codex review): a checkpoint left by a killed 0.7.0 session
+// holds rewards computed under the defective rules, including dead-end
+// penalties. Replayed on the first start after upgrading, it was written as
+// fixed-rule learning (rule = 1), negative Q included.
+describe("checkpoint recovery across the #37 rule change", () => {
+  it("discards pre-fix checkpoints and applies stamped ones", async () => {
+    const s = await seededContext((db) => {
+      db.exec("CREATE TABLE IF NOT EXISTS session_checkpoint (session_id TEXT PRIMARY KEY, rewards_json TEXT NOT NULL, updated_at TEXT NOT NULL)");
+      const put = db.prepare("INSERT INTO session_checkpoint VALUES (?, ?, datetime('now', ?))");
+      put.run("old-session", JSON.stringify({ "old-dead-end": -0.15, "old-neutral": 0 }), "-1 hour");
+      put.run("new-session", JSON.stringify({ rule: 37, rewards: { "cited-note": 1.0 } }), "-1 hour");
+      // Touched seconds ago: may belong to a server still running on this
+      // vault, which will flush it itself. Recovering it too credited twice.
+      put.run("live-session", JSON.stringify({ rule: 37, rewards: { "live-note": 1.0 } }), "-10 seconds");
+    });
+    ctx = s.ctx;
+    await callTool(ctx.client, "ori_wake"); // recovery runs at server start
+    const db = new Database(s.dbPath, { readonly: true });
+    try {
+      const rows = db.prepare("SELECT note_id, update_count, rule FROM note_q WHERE note_id IN ('old-dead-end', 'old-neutral', 'cited-note', 'live-note')").all();
+      expect(rows).toEqual([{ note_id: "cited-note", update_count: 1, rule: 1 }]);
+      const left = db.prepare("SELECT session_id FROM session_checkpoint ORDER BY session_id").all();
+      expect(left).toEqual([{ session_id: "live-session" }]);
+    } finally {
+      db.close();
+    }
   });
 });

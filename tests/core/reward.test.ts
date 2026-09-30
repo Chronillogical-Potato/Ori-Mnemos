@@ -281,3 +281,18 @@ describe("concludeSession (fix list item 5)", () => {
     );
   });
 });
+
+// #37 follow-up (Codex review): downstream_creation became report-only in #37
+// but was still checked before re_recall, so writing ANY note in a session
+// erased every re-recall credit in it.
+describe("credited signals win over report-only ones", () => {
+  it("re-recall is credited even when the session also created an unrelated note", () => {
+    const acc = new SessionRewardAccumulator("s1");
+    acc.logRetrieval("used", 1, "first question", "semantic");
+    acc.logRetrieval("used", 2, "a different question", "semantic");
+    acc.logAdd("unrelated", "no links here");
+    const rewards = acc.computeRewards(db);
+    expect(rewards.get("used")).toBeCloseTo(0.4, 10);
+    expect(acc.getSignalCounts()).toMatchObject({ re_recall: 1 });
+  });
+});

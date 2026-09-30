@@ -607,9 +607,13 @@ export async function runQueryRanked(
   let ranked = dampened;
   const phaseBDebug = new Map<string, { simNorm: number; qNorm: number; ucb: number }>();
   const qRerankDecision = shouldRun("q_reranking");
+  // Gated on useIntelligence, not on a caller-supplied sessionId: the CLI
+  // passes none, so this guard (unchanged since 2026-03) skipped Q reranking
+  // for every `ori query ranked` even after the CLI began minting
+  // activeSession above. phaseB only uses the session for logging, and
+  // record=false here.
   if (
     useIntelligence &&
-    sessionId &&
     qRerankDecision !== "abstain" &&
     qRerankDecision !== "skip"
   ) {
@@ -617,7 +621,16 @@ export async function runQueryRanked(
     const t5 = performance.now();
     // record=false: exposure and retrieval_log are written once, below, for
     // the notes actually returned.
-    ranked = phaseB(mainDb, dampened, query, classified.intent, activeSession, {}, false, phaseBDebug);
+    // k leaves room for injectExploration (step 13), which replaces the last
+    // max(1, floor(limit * budget)) slots: with k = resultLimit the cold-start
+    // floor's slot was the one it overwrote (Codex review).
+    const explorationSlots = config.retrieval.exploration_budget > 0
+      ? Math.max(1, Math.floor(resultLimit * config.retrieval.exploration_budget))
+      : 0;
+    ranked = phaseB(mainDb, dampened, query, classified.intent, activeSession, {}, false, phaseBDebug, {
+      k: Math.max(1, resultLimit - explorationSlots),
+      keepTail: true,
+    });
     pipelineElapsed += performance.now() - t5;
     trackStageAfter("q_reranking", ranked);
   }

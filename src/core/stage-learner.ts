@@ -105,11 +105,20 @@ export const STAGE_CONFIGS: StageConfig[] = [
     skipThreshold: 0.2,
     essential: false,
   },
+  // essential since #37 follow-up. The bandit's reward (measureCurrentQuality:
+  // score concentration + exact-term recall) cannot see what Q measures -
+  // whether a note was USED - and q_reranking rescales scores (RRF -> z-blend
+  // -> bias cap), which that metric reads as a quality change. Measured on a
+  // 1,566-note vault: after the fix, a freshly reset arm ran its 15
+  // exploration samples (mean reward -0.03, one -0.498 artifact) and then
+  // abstained on every query; before, it sat at UCB 0.17-0.19 against this
+  // 0.2 threshold. Either way the fixed Q never reached a result list. Q's
+  // influence is bounded by LAMBDA_MAX and Q_SCALE in rerank.ts instead.
   {
     id: "q_reranking",
     computeCostMs: 25,
     skipThreshold: 0.2,
-    essential: false,
+    essential: true,
   },
   {
     id: "cooccurrence_ppr",

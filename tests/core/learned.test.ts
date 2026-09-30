@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import Database from "better-sqlite3";
 import { exportLearned, importLearned, LEARNED_TABLES } from "../../src/core/learned.js";
+import { initQValueTables, migrateRuleColumn, updateQ, getQState } from "../../src/core/qvalue.js";
 
 // The README claimed for months that everything under .ori/ is derived and
 // disposable. Measured on a real vault, `rm -rf .ori/ && ori index build`
@@ -140,6 +141,44 @@ describe("the #37 reset answer survives a rebuild", () => {
     const dst = withMeta([["learning_reset_37", "declined:2026-09-28"], ["learning_reset_37_shown", "3"]]);
     importLearned(dst, ndjson);
     expect(meta(dst)).toMatchObject({ learning_reset_37: "declined:2026-09-28", learning_reset_37_shown: "3" });
+    dst.close();
+  });
+});
+
+// Codex review, round three: `index import-learned` opens the database without
+// initQValueTables. Importing into a pre-column note_q dropped the incoming
+// `rule`, and the migration then re-inferred it from mixed history.
+describe("note_q.rule survives export -> import into an unmigrated index", () => {
+  it("keeps fixed-rule learning valid", () => {
+    const src = new Database(":memory:");
+    initQValueTables(src);
+    updateQ(src, "n", 1.0, "s");
+    const { ndjson } = exportLearned(src);
+    expect(ndjson).toContain('"rule":1');
+    src.close();
+
+    // A 0.7.0 index: note_q without `rule`, legacy history for the same note.
+    const dst = seed();
+    dst.exec(`CREATE TABLE q_history (id INTEGER PRIMARY KEY AUTOINCREMENT, note_id TEXT NOT NULL,
+      old_q REAL NOT NULL, new_q REAL NOT NULL, reward REAL NOT NULL, reward_source TEXT NOT NULL,
+      session_id TEXT, timestamp TEXT NOT NULL DEFAULT (datetime('now')))`);
+    dst.prepare("INSERT INTO q_history (note_id, old_q, new_q, reward, reward_source) VALUES ('n', 0.5, 0.45, 0, 'session_batch')").run();
+    migrateRuleColumn(dst); // what the import command now does first
+    importLearned(dst, ndjson);
+    initQValueTables(dst);
+    expect(getQState(dst, "n")).toMatchObject({ learned: true, legacy: false });
+    dst.close();
+  });
+
+  it("an export that predates the column restores as legacy", () => {
+    const old = seed(); // no rule column: every export before this change
+    const { ndjson } = exportLearned(old);
+    expect(ndjson).not.toContain('"rule"');
+    old.close();
+    const dst = new Database(":memory:");
+    initQValueTables(dst);
+    importLearned(dst, ndjson);
+    expect(getQState(dst, "alpha")).toMatchObject({ learned: false, legacy: true });
     dst.close();
   });
 });

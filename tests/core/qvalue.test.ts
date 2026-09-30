@@ -20,6 +20,7 @@ import {
   MIN_EXPLORE_RETENTION,
   ALPHA,
   DEFAULT_Q,
+  getLearningHealth,
 } from "../../src/core/qvalue.js";
 
 let db: Database.Database;
@@ -28,6 +29,35 @@ beforeEach(() => {
   db = new Database(":memory:");
   db.pragma("journal_mode = WAL");
   initQValueTables(db);
+});
+
+describe("note_q.rule migration (#37 follow-up)", () => {
+  it("classifies existing rows once: fixed-rule history -> 1, anything else -> legacy", () => {
+    const d = new Database(":memory:");
+    d.exec(`CREATE TABLE note_q (note_id TEXT PRIMARY KEY, q_value REAL NOT NULL DEFAULT 0,
+      update_count INTEGER NOT NULL DEFAULT 0, exposure_count INTEGER NOT NULL DEFAULT 0,
+      reward_sum REAL NOT NULL DEFAULT 0, reward_sq_sum REAL NOT NULL DEFAULT 0,
+      last_updated TEXT NOT NULL DEFAULT (datetime('now')), last_reward REAL,
+      created TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE q_history (id INTEGER PRIMARY KEY AUTOINCREMENT, note_id TEXT NOT NULL,
+      old_q REAL NOT NULL, new_q REAL NOT NULL, reward REAL NOT NULL, reward_source TEXT NOT NULL,
+      session_id TEXT, timestamp TEXT NOT NULL DEFAULT (datetime('now')));`);
+    const row = d.prepare("INSERT INTO note_q (note_id, q_value, update_count) VALUES (?, ?, ?)");
+    const hist = d.prepare("INSERT INTO q_history (note_id, old_q, new_q, reward, reward_source) VALUES (?, ?, ?, 1, 'session_batch')");
+    row.run("fresh", 0.1, 1); hist.run("fresh", 0, 0.1);           // fixed rule: starts at 0
+    row.run("old", 0.45, 1); hist.run("old", 0.5, 0.45);           // old rule: starts at 0.5
+    row.run("no-history", 0.407, 4);                               // history purged by an earlier reset
+    row.run("unlearned", 0, 0);
+    initQValueTables(d);
+    const rules = Object.fromEntries((d.prepare("SELECT note_id, rule FROM note_q").all() as { note_id: string; rule: number }[]).map((r) => [r.note_id, r.rule]));
+    expect(rules).toEqual({ fresh: 1, old: 0, "no-history": 0, unlearned: 0 });
+    expect(getQState(d, "fresh")).toMatchObject({ learned: true, legacy: false });
+    expect(getQState(d, "no-history")).toMatchObject({ learned: false, legacy: true });
+    // Runs once: a later init does not reclassify.
+    d.prepare("UPDATE note_q SET rule = 1 WHERE note_id = 'old'").run();
+    initQValueTables(d);
+    expect((d.prepare("SELECT rule FROM note_q WHERE note_id = 'old'").get() as { rule: number }).rule).toBe(1);
+  });
 });
 
 describe("initQValueTables", () => {
@@ -188,24 +218,31 @@ describe("explorationBonus", () => {
     expect(bonus).toBeCloseTo(0.2 * 2.5, 10);
   });
 
-  it("is higher for rarely-retrieved notes", () => {
-    const rare = explorationBonus(
-      { mean: 0.5, variance: 0.1, count: 2 },
-      100,
-    );
-    const frequent = explorationBonus(
-      { mean: 0.5, variance: 0.1, count: 50 },
-      100,
-    );
-    expect(rare).toBeGreaterThan(frequent);
+  // #37 follow-up. These used to assert the UCB-Tuned property "fewer credits,
+  // bigger bonus". That property is what kept the inversion alive after the
+  // DEFAULT_Q fix: the first credit roughly halved the bonus while adding only
+  // ALPHA * reward of Q, so a used note ranked below an equally-shown unused
+  // one. The bonus now depends on exposure alone.
+  it("a credited note keeps the full bonus however often it was shown", () => {
+    const full = explorationBonus({ mean: 0, variance: 0.25, count: 0, exposure: 0 }, 0);
+    for (const exposure of [1, 10, 100, 10_000]) {
+      expect(explorationBonus({ mean: 0.4, variance: 0, count: 1, exposure }, 0)).toBeCloseTo(full, 12);
+      // Never-credited notes are still damped by exposure (fix-list item 8).
+      expect(explorationBonus({ mean: 0, variance: 0.25, count: 0, exposure }, 0)).toBeLessThan(full);
+    }
   });
 
-  it("decreases as note is retrieved more", () => {
-    const bonuses = [5, 10, 50, 100].map((count) =>
-      explorationBonus({ mean: 0.5, variance: 0.1, count }, 200),
-    );
-    for (let i = 1; i < bonuses.length; i++) {
-      expect(bonuses[i]).toBeLessThanOrEqual(bonuses[i - 1]);
+  it("a credit never lowers a note's total boost (Q + bonus) at equal exposure", () => {
+    const boost = (credits: number[]): number => {
+      const d = new Database(":memory:");
+      initQValueTables(d);
+      for (let i = 0; i < 10; i++) incrementExposure(d, "n");
+      for (const r of credits) updateQ(d, "n", r, "s");
+      return getDecayedQ(d, "n") + explorationBonus(getRewardStats(d, "n"), 1700);
+    };
+    const none = boost([]);
+    for (const credits of [[0.4], [0.5], [1], [1, 1], [0.4, 0.5, 1]]) {
+      expect(boost(credits)).toBeGreaterThan(none);
     }
   });
 });
@@ -425,5 +462,97 @@ describe("applyColdStartFloor (fix list item 8)", () => {
     });
     expect(fires.map((r) => r.title)).toContain("note-9");
     expect(misses.map((r) => r.title)).not.toContain("note-9");
+  });
+});
+
+// #37 follow-up: Q learned under the pre-#37 rules (first update from
+// old_q = 0.5) is ignored at read time instead of deleted.
+describe("legacy (pre-#37) learning", () => {
+  /** A note as the old rules left it: history starting at 0.5, Q pulled below. */
+  function seedLegacyNote(id: string, q = 0.38, updates = 3): void {
+    db.prepare(
+      `INSERT INTO note_q (note_id, q_value, update_count, exposure_count, reward_sum, reward_sq_sum, last_updated)
+       VALUES (?, ?, ?, 7, 0, 0, datetime('now'))`,
+    ).run(id, q, updates);
+    let old = 0.5;
+    for (let i = 0; i < updates; i++) {
+      const next = old - 0.04;
+      db.prepare(
+        "INSERT INTO q_history (note_id, old_q, new_q, reward, reward_source) VALUES (?, ?, ?, 0, 'session_batch')",
+      ).run(id, old, next);
+      old = next;
+    }
+  }
+
+  it("reads as unlearned everywhere ranking looks", () => {
+    seedLegacyNote("old-note");
+    expect(getQ(db, "old-note")).toBe(DEFAULT_Q);
+    expect(getDecayedQ(db, "old-note")).toBe(DEFAULT_Q);
+    expect(getRewardStats(db, "old-note")).toMatchObject({ learned: false, count: 0, exposure: 7 });
+    expect(getQState(db, "old-note")).toMatchObject({ learned: false, legacy: true, q: DEFAULT_Q });
+  });
+
+  it("does not count toward the lambda warm-up", () => {
+    seedLegacyNote("old-note", 0.38, 40);
+    updateQ(db, "new-note", 1.0, "s");
+    expect(getTotalQUpdates(db)).toBe(1);
+  });
+
+  it("is kept on disk, not deleted, until the note earns new credit", () => {
+    seedLegacyNote("old-note", 0.38, 3);
+    const row = db.prepare("SELECT q_value, update_count FROM note_q WHERE note_id = 'old-note'").get();
+    expect(row).toEqual({ q_value: 0.38, update_count: 3 });
+    expect((db.prepare("SELECT COUNT(*) n FROM q_history WHERE note_id = 'old-note'").get() as { n: number }).n).toBe(3);
+  });
+
+  it("first new credit archives the legacy history and starts from 0", () => {
+    seedLegacyNote("old-note", 0.38, 3);
+    updateQ(db, "old-note", 1.0, "s");
+    expect(getQ(db, "old-note")).toBeCloseTo(ALPHA * 1.0, 10);
+    expect(getQState(db, "old-note")).toMatchObject({ learned: true, legacy: false, updateCount: 1 });
+    const archived = db.prepare("SELECT COUNT(*) n FROM q_history_pre_37 WHERE note_id = 'old-note'").get() as { n: number };
+    expect(archived.n).toBe(3);
+    const history = db.prepare("SELECT old_q, new_q FROM q_history WHERE note_id = 'old-note'").all();
+    expect(history).toEqual([{ old_q: 0, new_q: ALPHA }]);
+    // Reward sums restart with the new rule, so UCB stats are not a mix of both.
+    expect(getRewardStats(db, "old-note")).toMatchObject({ count: 1, mean: 1 });
+  });
+
+  // import-learned REPLACES note_q rows but APPENDS q_history, so history
+  // cannot say which rule produced the current value; the row's own marker can
+  // (Codex review: one reproduction for each direction).
+  it("an imported fixed-rule row stays valid even when legacy history is present", () => {
+    seedLegacyNote("mixed", 0.38, 3);
+    // What import writes for a row exported after retirement: its rule travels.
+    db.prepare("UPDATE note_q SET q_value = 0.19, update_count = 2, rule = 1 WHERE note_id = 'mixed'").run();
+    expect(getQState(db, "mixed")).toMatchObject({ legacy: false, learned: true, q: 0.19 });
+    updateQ(db, "mixed", 1.0, "s");
+    // Not retired: continues from 0.19 instead of being wiped to 0.
+    expect(getQ(db, "mixed")).toBeCloseTo(0.19 + ALPHA * (1 - 0.19), 2);
+  });
+
+  it("an old export imported over fixed-rule learning is treated as legacy", () => {
+    updateQ(db, "n", 1.0, "s"); // fresh learning, rule = 1
+    // Old exports have no `rule`: import writes NULL along with the old value.
+    db.prepare("UPDATE note_q SET q_value = 0.38, update_count = 3, rule = NULL WHERE note_id = 'n'").run();
+    expect(getQState(db, "n")).toMatchObject({ legacy: true, learned: false, q: DEFAULT_Q });
+    expect(getTotalQUpdates(db)).toBe(0);
+  });
+
+  it("legacy citations do not count in health's forward-citation figure", () => {
+    seedLegacyNote("old-note", 0.38, 3);
+    db.prepare("UPDATE q_history SET reward = 1.0 WHERE note_id = 'old-note'").run();
+    updateQ(db, "new-note", 0.5, "s");
+    const h = getLearningHealth(db);
+    expect(h.forwardCitations).toBe(0);
+    expect(h.totalUpdates).toBe(1);
+    expect(h.legacyNotes).toBe(1);
+  });
+
+  it("leaves fixed-rule notes alone", () => {
+    updateQ(db, "new-note", 1.0, "s");
+    updateQ(db, "new-note", 1.0, "s");
+    expect(getQState(db, "new-note")).toMatchObject({ learned: true, legacy: false, updateCount: 2 });
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'q_history_pre_37'").get()).toBeUndefined();
   });
 });

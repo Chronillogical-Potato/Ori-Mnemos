@@ -4,7 +4,10 @@
  * Before #37, `DEFAULT_Q` was 0.5 and every typical reward sat below it, so
  * the EMA lowered a note's Q each time it was used. Every vault that learned
  * under those rules holds Q-values that rank used notes below unused ones.
- * The fixed rules stop new damage but do not repair stored values.
+ * The fixed rules stop new damage but do not repair stored values. Since the
+ * follow-up in qvalue.ts (LEGACY_NOTES_SQL) ranking ignores those values at read
+ * time, so this reset is housekeeping: it archives them instead of leaving
+ * them stored and counted.
  *
  * The reset is offered, not forced: the MCP server surfaces a notice to the
  * agent, the agent asks the user, and `ori_learning_reset` records the answer.
@@ -19,6 +22,7 @@
  *   - backs the database file up first.
  */
 import type Database from "better-sqlite3";
+import { LEGACY_NOTES_SQL } from "./qvalue.js";
 
 /** `meta` key holding the user's answer: "accepted:<iso>" or "declined:<iso>". */
 export const LEARNING_RESET_KEY = "learning_reset_37";
@@ -99,12 +103,11 @@ function writeDecision(db: Database.Database, decision: "accepted" | "declined")
 /**
  * Whether this vault holds learning from the old rules, and whether to ask.
  *
- * "Legacy" is identified from the history itself, because the old code wrote no
- * version stamp: under the old rules a note's first update started from
- * `old_q = 0.5`, under the new ones from 0. Any note with such a row learned
- * under the old rules, and all of its history is counted. After an accepted
- * reset `q_history` is archived and empty, so the count drops to 0; after a
- * decline the stored answer stops the question.
+ * "Legacy" is LEGACY_NOTES_SQL in qvalue.ts - the same definition ranking uses,
+ * so the reset can never clear learning that ranking treats as valid, and
+ * never miss learning that ranking ignores. After an accepted reset those
+ * notes read as unlearned, so the count drops to 0; after a decline the stored
+ * answer stops the question.
  */
 export function getLearningResetStatus(db: Database.Database): LearningResetStatus {
   const decision = readDecision(db);
@@ -119,9 +122,8 @@ export function getLearningResetStatus(db: Database.Database): LearningResetStat
   try {
     const row = db
       .prepare(
-        `SELECT COUNT(*) AS n, COUNT(DISTINCT note_id) AS notes
-           FROM q_history
-          WHERE note_id IN (SELECT note_id FROM q_history WHERE old_q = 0.5)`,
+        `SELECT COALESCE(SUM(update_count), 0) AS n, COUNT(*) AS notes
+           FROM note_q WHERE note_id IN (${LEGACY_NOTES_SQL})`,
       )
       .get() as { n: number; notes: number };
     legacyUpdates = row.n;
@@ -155,12 +157,11 @@ export function buildLearningResetNotice(status: LearningResetStatus): string | 
     `Why: Ori found ${status.legacyUpdates} learned ranking updates on ${status.legacyNotes} notes computed ` +
     `under a scoring rule with a known defect (issue #37). Every note started at a score above almost any ` +
     `reward it could earn, so each time a note was used its score went down: notes the user actually relies ` +
-    `on ended up ranked below notes that were never opened. The rule is fixed for new learning, but these ` +
-    `stored scores are on the old scale and keep distorting search: the most-used notes still rank lowest ` +
-    `among them, and they drown out anything learned under the fixed rule. ` +
+    `on ended up ranked below notes that were never opened. The rule is fixed, and search now ignores these ` +
+    `old scores, but they are still stored and still counted in health reports. ` +
     `Ask the user at a natural pause, in your own words: "Ori had a bug where notes you use a lot got ranked ` +
-    `lower than notes you've never opened, because each use counted against them. It's fixed now, but the old ` +
-    `scores are still skewing search. Want me to reset them so learning starts clean? Your notes aren't ` +
+    `lower than notes you've never opened, because each use counted against them. It's fixed, and search ` +
+    `already ignores the old scores. Want me to clear them out so the stored data is clean? Your notes aren't ` +
     `touched and the database is backed up first. You can say yes, not now, or no and never ask again` +
     (last ? `. This is the last time I'll ask."` : ` (I'll ask at most ${MAX_RESET_REMINDERS} times)."`) +
     ` If yes: call ori_learning_reset with decision="accepted". ` +
@@ -196,7 +197,10 @@ function resetLegacyLearning(
     `);
     // Only notes that learned under the old rule. Learning made under the fixed
     // rule between the upgrade and a late "yes" is kept.
-    const LEGACY = "SELECT note_id FROM q_history WHERE old_q = 0.5";
+    //
+    // Order matters: the legacy set is defined by note_q, and clearing note_q
+    // empties it. Archive and delete history first, clear note_q last.
+    const LEGACY = LEGACY_NOTES_SQL;
     historyArchived = db
       .prepare(
         `INSERT INTO q_history_pre_37
@@ -204,6 +208,7 @@ function resetLegacyLearning(
              FROM q_history WHERE note_id IN (${LEGACY})`,
       )
       .run().changes;
+    db.exec(`DELETE FROM q_history WHERE note_id IN (${LEGACY})`);
     notesCleared = db
       .prepare(
         `UPDATE note_q
@@ -212,7 +217,6 @@ function resetLegacyLearning(
           WHERE note_id IN (${LEGACY})`,
       )
       .run().changes;
-    db.exec(`DELETE FROM q_history WHERE note_id IN (${LEGACY})`);
   });
   tx();
 
@@ -231,7 +235,9 @@ export interface LearningResetResult {
 function legacyCount(db: Database.Database): number {
   try {
     return (
-      db.prepare("SELECT COUNT(*) AS n FROM q_history WHERE old_q = 0.5").get() as { n: number }
+      // Legacy NOTES, the unit the old count had in effect (one first-update
+      // row per note), so import reporting keeps its meaning.
+      db.prepare(`SELECT COUNT(*) AS n FROM (${LEGACY_NOTES_SQL})`).get() as { n: number }
     ).n;
   } catch {
     return 0;
@@ -275,7 +281,7 @@ export function applyLearningResetDecision(
 
 }
 
-/** Old-rule rows currently in q_history. Call before and after an import. */
+/** Notes currently holding old-rule learning. Call before and after an import. */
 export function countLegacyLearning(db: Database.Database): number {
   return legacyCount(db);
 }

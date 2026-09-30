@@ -418,7 +418,7 @@ Notes earn Q-values from session outcomes via exponential moving average updates
 | Update after retrieval | +0.5 | You edit a note you just retrieved |
 | Within-session re-recall | +0.4 | Same note surfaces across different queries |
 
-After RRF fusion, Phase B reranks the candidate set with a lambda blend of similarity score and learned Q-value, plus a UCB-Tuned exploration bonus that ensures under-retrieved notes still get discovered. A cumulative bias cap (MAX=3.0, compression=0.3) prevents runaway score inflation.
+After RRF fusion, Phase B reranks the candidate set with a lambda blend of similarity score and learned Q-value, plus an exploration bonus that ensures under-retrieved notes still get discovered. The bonus shrinks as a note is shown without ever being used; once a note has been credited it keeps the full bonus, so being used never ranks a note below an equally relevant note nobody has seen. A cumulative bias cap (MAX=3.0, compression=0.3) prevents runaway score inflation.
 
 ### Layer 2 — Co-Occurrence Edges
 
@@ -430,9 +430,9 @@ The combined wiki-link + co-occurrence graph feeds a Personalized PageRank walk 
 
 ### Layer 3 — Stage Meta-Learning
 
-Each pipeline stage (BM25, PageRank, warmth, hub dampening, Q-reranking, co-occurrence PPR) is wrapped in a LinUCB contextual bandit with an 8-dimensional query feature vector. The system learns which stages help for which query types and auto-skips stages that consistently hurt.
+Each optional pipeline stage (PageRank, warmth, hub dampening, co-occurrence PPR) is wrapped in a LinUCB contextual bandit with an 8-dimensional query feature vector. The system learns which stages help for which query types and auto-skips stages that consistently hurt.
 
-Three-way decisions per stage: **run** / **skip** / **abstain** (stop the pipeline early). Cost-sensitive thresholds ensure expensive stages face a higher bar. Essential stages (semantic search, RRF fusion) never skip. An ACQO two-phase curriculum runs all stages during exploration (first 50 samples), then optimizes.
+Three-way decisions per stage: **run** / **skip** / **abstain** (stop the pipeline early). Cost-sensitive thresholds ensure expensive stages face a higher bar. Essential stages (semantic search, BM25, RRF fusion, Q-reranking) never skip. Q-reranking is essential because the bandit's reward measures result shape and term recall, which cannot see whether a note was used. An ACQO two-phase curriculum runs all stages during exploration (first 50 samples), then optimizes.
 
 ### Session Learning Loop
 

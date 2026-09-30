@@ -85,7 +85,10 @@ describe("learning reset offer", () => {
     expect(notice).toMatch(/^Learning reset question, reminder 1 of 3\./);
     expect(notice).toContain("Why:");
     expect(notice).toMatch(/each time a note was used its score went down/);
-    expect(notice).toMatch(/drown out anything learned under the fixed rule/);
+    // Old-rule scores are ignored at read time, so the notice must not claim
+    // they still distort search.
+    expect(notice).toMatch(/search now ignores these old scores/);
+    expect(notice).not.toMatch(/distort/);
     expect(notice).toMatch(/no and never ask again/);
     expect(notice).toMatch(/decision="declined"; that is permanent/);
   });
@@ -252,5 +255,19 @@ describe("learning reset decision", () => {
     applyLearningResetDecision(db, dbPath, "accepted");
     updateQ(db, "note-0", 0.2, "s2");
     expect(getQ(db, "note-0")).toBeGreaterThan(getQ(db, "never-seen"));
+  });
+});
+
+// Codex review, round two: the reset and ranking used different definitions of
+// "legacy", so a reset could clear learning ranking treated as valid.
+describe("the reset agrees with ranking about what is legacy", () => {
+  it("never clears a note ranking reads as learned, even with legacy history present", () => {
+    seedLegacy(5, 6);
+    // An import of a post-retirement export: fixed-rule row, legacy history kept.
+    db.prepare("UPDATE note_q SET q_value = 0.1, update_count = 1, rule = 1 WHERE note_id = 'note-0'").run();
+    recordLearningResetShown(db);
+    const r = applyLearningResetDecision(db, dbPath, "accepted");
+    expect(r.notesCleared).toBe(4);
+    expect(getQ(db, "note-0")).toBeCloseTo(0.1, 10);
   });
 });
