@@ -39,6 +39,7 @@ import {
 import { StageTracker } from "../core/stage-tracker.js";
 import type Database from "better-sqlite3";
 import { checkForUpdate, buildAgentNotice, SessionNoticeGate, writeUpdateDecision } from "../core/update-check.js";
+import { takeWhatsNewNotice, whatsNew } from "../core/whats-new.js";
 import {
   getLearningResetStatus,
   buildLearningResetNotice,
@@ -169,6 +170,7 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
   // ─── Retrieval Intelligence: Session lifecycle ───
   const sessionId = crypto.randomUUID();
   const noticeGate = new SessionNoticeGate();
+  const whatsNewGate = new SessionNoticeGate();
   // Separate gate: the #37 reset question must not be swallowed by the update
   // notice (or vice versa) when both are pending in the same session.
   const resetNoticeGate = new SessionNoticeGate();
@@ -495,6 +497,17 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
     }
   };
 
+  // ─── What's new after an update: once per machine per update ───
+  const attachWhatsNew = async (payload: Record<string, unknown>): Promise<void> => {
+    if (!whatsNewGate.take()) return;
+    try {
+      const notice = await takeWhatsNewNotice();
+      if (notice) payload.whats_new = notice;
+    } catch {
+      // Best effort: a notice must never fail the tool carrying it.
+    }
+  };
+
   // ─── Tools ───
 
 
@@ -506,6 +519,7 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
     async ({ budget }) => {
       const payload: Record<string, unknown> = await runWake(vaultDir, budget ?? 96);
       attachLearningResetNotice(payload);
+      await attachWhatsNew(payload);
 
       // First-run detection and onboarding used to live in ori_orient, whose
       // own description said "prefer ori_wake for session start". Removing
@@ -543,6 +557,14 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
       await writeUpdateDecision(version, decision);
       return textResult({ success: true, version, decision, note: "Decision recorded; this version will not be asked again." });
     }
+  );
+
+  server.tool(
+    "ori_whats_new",
+    "Release notes for an Ori version (default: the installed one). Use when the user asks what changed, " +
+      "or to read notes cut short in a whats_new notice.",
+    { version: z.string().optional().describe("e.g. 0.7.1; omit for the installed version") },
+    async ({ version }) => textResult({ version: version ?? VERSION, notes: whatsNew(version) }),
   );
 
   // ori_learning_reset — record the user's answer to the #37 reset question
@@ -760,8 +782,9 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
         sessionStageTracker,
       );
 
-      // #37 reset question, for sessions that skip wake.
+      // #37 reset question and what's new, for sessions that skip wake.
       if (result.success) attachLearningResetNotice(result.data as Record<string, unknown>);
+      if (result.success) await attachWhatsNew(result.data as Record<string, unknown>);
 
       // Once-per-session update notice fallback (sessions that skip orient)
       if (result.success) {

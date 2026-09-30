@@ -88,6 +88,14 @@ program
   });
 
 program
+  .command("whats-new [version]")
+  .description("Release notes for the installed Ori version, or the one given")
+  .action(async (version?: string) => {
+    const { whatsNew } = await import("./core/whats-new.js");
+    console.log(whatsNew(version));
+  });
+
+program
   .command("sql")
   .description("Read-only SQL over the memory index")
   .argument("[query]", "a single SELECT/WITH/EXPLAIN/VALUES statement; omit with --schema")

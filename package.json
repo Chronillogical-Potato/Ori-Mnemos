@@ -58,13 +58,14 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "CHANGELOG.md",
     "dist",
     "scaffold",
     "adapters"
   ],
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run lint && npm run build && npm run smoke:bin",
+    "prepublishOnly": "node scripts/check-changelog.mjs && npm run lint && npm run build && npm run smoke:bin",
     "dev": "tsc --watch",
     "test": "npm run build && vitest run --environment node",
     "test:watch": "vitest --environment node",

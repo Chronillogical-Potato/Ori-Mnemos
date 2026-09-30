@@ -319,7 +319,7 @@ ori bridge codex --vault ~/brain                       # ~/.codex/config.toml
 ori bridge generic --vault ~/brain                     # prints config for manual setup
 ```
 
-Claude Code, Hermes Agent, and OpenCode get full lifecycle integration — the agent orients at session start, captures insights at session end, and validates notes on write. Cursor, Codex, and other MCP clients get access to all 15 tools but manage their own session lifecycle.
+Claude Code, Hermes Agent, and OpenCode get full lifecycle integration — the agent orients at session start, captures insights at session end, and validates notes on write. Cursor, Codex, and other MCP clients get access to all 16 tools but manage their own session lifecycle.
 
 Manual MCP config (works with any client that speaks MCP):
 
@@ -451,7 +451,7 @@ All updates happen in a single SQLite transaction at session end, in order: co-o
 ## The Stack
 
 ```
-Layer 6: MCP Server                    15 tools, 5 resources — any agent talks to this
+Layer 6: MCP Server                    16 tools, 5 resources — any agent talks to this
 Layer 5: Recursive Exploration         PPR graph traversal, sub-question decomposition, convergence detection
 Layer 4: Retrieval Intelligence        Q-value reranking, co-occurrence learning, stage meta-optimization
 Layer 3: Dampening Pipeline            gravity, hub, resolution — ablation-validated
@@ -460,7 +460,7 @@ Layer 1: Knowledge Graph + Vitality    wiki-links, ACT-R decay, spreading activa
 Layer 0: Markdown files on disk        git-friendly, human-readable, portable
 ```
 
-15 MCP tools · 5 resources · 19 CLI commands · 874 tests
+16 MCP tools · 5 resources · 20 CLI commands · 874 tests
 
 ---
 
@@ -530,6 +530,7 @@ A typical session costs **~$0.10** with Ori. Without it: **~$6.00+**.
 | `ori_wake` | Session boot: bounded briefing, plus onboarding on a fresh vault |
 | `ori_update` | Write to identity, goals, methodology, daily, or reminders |
 | `ori_update_decision` | Record the user's answer to an update notice |
+| `ori_whats_new` | Release notes for the installed version, or any version |
 | `memory_sql` | Read-only SQL over the index — anything the ranking tools cannot express |
 | `ori_health` | Full diagnostics |
 | `ori_add` | Capture to inbox |
@@ -570,6 +571,7 @@ and `ori explore-conclude`.
 ori init [dir]                    # Scaffold a new vault
 ori status                        # Vault overview
 ori health                        # Full diagnostics
+ori whats-new [version]           # Release notes
 
 # Note lifecycle
 ori add <title> [--type <type>]   # Capture to inbox

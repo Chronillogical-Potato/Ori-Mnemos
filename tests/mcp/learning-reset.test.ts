@@ -51,6 +51,7 @@ async function seededContext(
     args: [path.resolve(import.meta.dirname, "..", "..", "dist", "index.js"), "serve", "--mcp"],
     cwd: vault,
     stderr: "pipe",
+    env: process.env as Record<string, string>,
   });
   const client = new Client({ name: "ori-test-client", version: "1.0.0" }, { capabilities: {} });
   await client.connect(transport);
@@ -101,6 +102,7 @@ describe("#37 learning reset over MCP", () => {
           args: [path.resolve(import.meta.dirname, "..", "..", "dist", "index.js"), "serve", "--mcp"],
           cwd: vault,
           stderr: "pipe",
+          env: process.env as Record<string, string>,
         });
         const client = new Client({ name: "ori-test-client", version: "1.0.0" }, { capabilities: {} });
         await client.connect(transport);

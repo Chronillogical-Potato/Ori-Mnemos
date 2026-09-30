@@ -192,6 +192,7 @@ export async function buildAgentNotice(info: UpdateInfo): Promise<string | null>
   if (prior && prior.version === info.latest) return null; // user already answered for this version
   return (
     `Ori ${info.latest} is available (installed: ${info.current}). ` +
+    `What changed: https://github.com/aayoawoyemi/Ori-Mnemos/releases/tag/v${info.latest} ` +
     `Ask the user at a natural pause: "By the way, Ori pushed an update to v${info.latest} — want me to update it, or keep using v${info.current}?" ` +
     `If they say yes: run \`npm update -g ori-memory\` and then call ori_update_decision with decision="accepted". ` +
     `If they say no: call ori_update_decision with decision="declined". ` +

@@ -42,6 +42,10 @@ export async function createMcpTestContext(): Promise<McpTestContext> {
     args: [distIndex, "serve", "--mcp"],
     cwd: vaultDir,
     stderr: "pipe",
+    // The SDK passes only a small env whitelist to the server; without this
+    // ORI_UPDATE_CACHE_DIR (vitest.config.ts) never arrives and test servers
+    // write update and what's-new state into the developer's real cache.
+    env: process.env as Record<string, string>,
   });
 
   const client = new Client(

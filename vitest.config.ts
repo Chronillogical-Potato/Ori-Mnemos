@@ -1,4 +1,6 @@
 import { defineConfig } from "vitest/config";
+import os from "node:os";
+import path from "node:path";
 
 export default defineConfig({
   test: {
@@ -11,5 +13,8 @@ export default defineConfig({
     // MCP tests spawn a real server; embedding model load can be slow cold.
     testTimeout: 30000,
     hookTimeout: 120000,
+    // Keep the update check and "what's new" state out of the developer's
+    // real cache. Spawned MCP servers inherit this.
+    env: { ORI_UPDATE_CACHE_DIR: path.join(os.tmpdir(), "ori-test-update-cache") },
   },
 });
