@@ -760,10 +760,12 @@ ori --version
 ```
 
 ```bash
-npm test              # 579+ tests
+npm test              # 860+ tests
 npm run lint          # Type check
 npm run dev           # Watch mode
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
 
 Thanks to [@maichler](https://github.com/maichler) and the rest of the Ori community for their PRs and additions.
 
