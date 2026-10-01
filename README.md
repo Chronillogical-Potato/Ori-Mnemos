@@ -43,7 +43,7 @@ for (const hit of res.data.results) console.log(hit.title, hit.score);
 vectors, graph metrics and a config; `recall` does that assembly for you.
 
 The export surface is deliberately small and is a semver contract; the rest of
-`src/core` is internal. Versions before 0.7.1 shipped no `main` and no
+`src/core` is internal. Versions before 0.8.0 shipped no `main` and no
 `exports`, so a bare import threw and the library path did not exist — but the
 CLI and MCP paths always worked, and existing users were unaffected.
 

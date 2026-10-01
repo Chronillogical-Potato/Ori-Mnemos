@@ -563,7 +563,7 @@ export async function runServeMcp(startDir: string, vaultOverride?: string) {
     "ori_whats_new",
     "Release notes for an Ori version (default: the installed one). Use when the user asks what changed, " +
       "or to read notes cut short in a whats_new notice.",
-    { version: z.string().optional().describe("e.g. 0.7.1; omit for the installed version") },
+    { version: z.string().optional().describe("e.g. 0.8.0; omit for the installed version") },
     async ({ version }) => textResult({ version: version ?? VERSION, notes: whatsNew(version) }),
   );
 
