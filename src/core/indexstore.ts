@@ -40,6 +40,7 @@ import type { LinkGraph } from "./graph.js";
 import { resolveLinkTarget, stripCodeFences } from "./graph.js";
 import { parseFrontmatter, readFrontmatterFile, writeFrontmatterFile } from "./frontmatter.js";
 import { slugify } from "./slug.js";
+import { pruneUnknownQRows } from "./qvalue.js";
 import { tokenize } from "./bm25.js";
 import { isForgotten } from "./status.js";
 
@@ -540,6 +541,7 @@ export async function syncIndex(db: DB, notesDir: string): Promise<SyncResult> {
                "ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(now);
   });
   apply();
+  pruneUnknownQRows(db); // #41: phantom learner rows for non-notes
 
   const [counts] = rows<{ edges: number; dangling: number }>(db, `
     SELECT (SELECT COUNT(*) FROM edge) AS edges,

@@ -55,7 +55,50 @@ export function stripCodeFences(content: string): string {
       // drop all fenced lines (including the closing fence)
     }
   }
-  return kept.join("\n");
+  return stripInlineCode(kept.join("\n"));
+}
+
+/**
+ * Blank CommonMark inline code spans (§6.1) so bash `[[ -t 0 ]]` written in
+ * prose is not read as a wikilink (#40). A span opened by a run of N backticks
+ * closes at the next run of exactly N. A span never crosses a blank line, so a
+ * stray backtick cannot swallow links paragraphs away; an unclosed run is
+ * literal text. Spans become a single space, newlines kept.
+ */
+export function stripInlineCode(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "`") {
+      out += text[i];
+      i++;
+      continue;
+    }
+    let n = 0;
+    while (text[i + n] === "`") n++;
+    let close = -1;
+    let j = i + n;
+    while (j < text.length) {
+      if (text[j] === "\n" && /^\n[ \t]*(\r?\n|$)/.test(text.slice(j, j + 80))) break;
+      if (text[j] === "`") {
+        let m = 0;
+        while (text[j + m] === "`") m++;
+        if (m === n) { close = j; break; }
+        j += m;
+        continue;
+      }
+      j++;
+    }
+    if (close === -1) {
+      out += text.slice(i, i + n);
+      i += n;
+      continue;
+    }
+    const span = text.slice(i, close + n);
+    out += " " + span.replace(/[^\n]/g, "");
+    i = close + n;
+  }
+  return out;
 }
 
 /**

@@ -491,6 +491,7 @@ export function updateQ(
   }
 
   noteId = slugify(noteId);
+  if (!isKnownNote(db, noteId)) return;
   // First fixed-rule credit on a note with legacy learning: archive the legacy
   // history and start from 0, or this note would stay classified as legacy
   // (and ignored) forever, with reward sums mixing both rule sets.
@@ -545,11 +546,57 @@ export function updateQ(
   ).run(noteId, oldQ, newQ, reward, source, sessionId);
 }
 
+/**
+ * True unless the derived index exists, is populated, and has no note with
+ * this slug (#41). Dangling link targets and parser false positives must not
+ * get learner state. With no index (degraded mode) nothing is refused.
+ */
+export function isKnownNote(db: Database.Database, slug: string): boolean {
+  try {
+    if (!db.prepare("SELECT 1 FROM note LIMIT 1").get()) return true;
+    // note.slug holds the file basename; compare in slug space. The exact
+    // match is the common case; only a miss pays for the full scan.
+    if (db.prepare("SELECT 1 FROM note WHERE slug = ?").get(slug)) return true;
+    return indexedSlugs(db).has(slug);
+  } catch {
+    return true; // no note table
+  }
+}
+
+function indexedSlugs(db: Database.Database): Set<string> {
+  const rows = db.prepare("SELECT slug FROM note").all() as { slug: string }[];
+  return new Set(rows.map((r) => slugify(r.slug)));
+}
+
+/**
+ * Delete never-credited note_q rows whose note does not exist (#41). They
+ * hold no earned reward by definition, only exposure. Rows with credit are
+ * kept: a renamed or deleted note's history is not this function's call.
+ */
+export function pruneUnknownQRows(db: Database.Database): number {
+  try {
+    if (!db.prepare("SELECT 1 FROM note LIMIT 1").get()) return 0;
+    const known = indexedSlugs(db);
+    const rows = db
+      .prepare("SELECT note_id FROM note_q WHERE update_count = 0")
+      .all() as { note_id: string }[];
+    const del = db.prepare("DELETE FROM note_q WHERE note_id = ?");
+    let n = 0;
+    for (const r of rows) {
+      if (!known.has(r.note_id)) n += del.run(r.note_id).changes;
+    }
+    return n;
+  } catch {
+    return 0; // no note or note_q table
+  }
+}
+
 export function incrementExposure(
   db: Database.Database,
   noteId: string,
 ): void {
   noteId = slugify(noteId);
+  if (!isKnownNote(db, noteId)) return;
   db.prepare(
     `
     INSERT INTO note_q (note_id, exposure_count)
