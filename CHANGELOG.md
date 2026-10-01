@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.8.1] - 2026-10-01
+
+Auto-promote fixes, found by adding notes to a real 1,571-note vault.
+
+### Fixed
+
+- **Auto-linking rewrote code and linked common words (#44).** Titles inside
+  fenced or inline code are no longer turned into `[[links]]` (a diagram's
+  `.ori/index.db` became `.ori/[[index]].db`). The default area (`index`) and
+  hub notes (more than 128 incoming links) are no longer auto-linked from prose.
+- **Suggested connections were the first notes alphabetically (#45).** A hub
+  is no longer used to find related notes, since every note links it.
+  Candidates are ranked by how many of the note's links they share.
+- **`ori add` with a complete note (#46).** Content with its own `# Title`
+  no longer gets a second one from the template. Content with its own
+  `Relevant Notes:` / `Areas:` footer is used as-is, with no template
+  instructions or empty footer appended. `$&` in content is kept literally.
+- **Promote deleted the reasons on related links (#46).** `- [[note]] -- why`
+  keeps its `-- why` when footers are merged; this affected every promote.
+
 ## [0.8.0] - 2026-09-30
 
 ### Breaking
