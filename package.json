@@ -39,13 +39,13 @@
   "homepage": "https://github.com/aayoawoyemi/Ori-Mnemos",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aayoawoyemi/Ori-Mnemos.git"
+    "url": "git+https://github.com/aayoawoyemi/Ori-Mnemos.git"
   },
   "license": "Apache-2.0",
   "author": "Aayo Awoyemi",
   "type": "module",
   "bin": {
-    "ori": "./dist/index.js"
+    "ori": "dist/index.js"
   },
   "types": "./dist/lib.d.ts",
   "exports": {
