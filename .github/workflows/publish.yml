@@ -1,18 +1,22 @@
-name: Publish to npm
+name: Stage npm release
 
-# One button: Actions -> "Publish to npm" -> Run workflow.
-# Publishes whatever version is in package.json on main, then tags it and
-# creates a GitHub release from the matching CHANGELOG section.
+# Push a version bump to main and this stages it on npm. Nothing goes live
+# until you press Approve on npmjs.com -> Staged Packages (2FA).
+# Can also be run by hand: Actions -> "Stage npm release" -> Run workflow.
 #
 # Auth is npm Trusted Publishing (OIDC): no NPM_TOKEN secret. One-time setup on
 # npmjs.com -> ori-memory -> Settings -> Trusted Publisher -> GitHub Actions:
-#   owner aayoawoyemi, repository Ori-Mnemos, workflow publish.yml
+#   owner aayoawoyemi, repository Ori-Mnemos, workflow publish.yml,
+#   with "stage publish" allowed.
 
 on:
+  push:
+    branches: ["main"]
+    paths: ["package.json"]
   workflow_dispatch:
 
 permissions:
-  contents: write # tag + GitHub release
+  contents: read
   id-token: write # npm trusted publishing + provenance
 
 concurrency:
@@ -20,8 +24,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    if: github.ref == 'refs/heads/main'
+  stage:
+    if: github.ref == 'refs/heads/main' && github.repository == 'aayoawoyemi/Ori-Mnemos'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,49 +34,64 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          # Trusted publishing needs npm >= 11.5.1; Node 24 ships it.
           node-version: 24
           registry-url: https://registry.npmjs.org
           cache: npm
 
-      - name: Read version
-        id: v
-        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      # Staged publishing needs npm >= 11.15.0.
+      - name: Update npm
+        run: npm install -g npm@latest && npm --version
 
-      - name: Refuse a version that is already published
+      - name: Is this version new?
+        id: v
         run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           # Compare output, not exit code: npm versions disagree on whether a
           # missing version is an error.
-          if [ "$(npm view "ori-memory@${{ steps.v.outputs.version }}" version 2>/dev/null)" = "${{ steps.v.outputs.version }}" ]; then
-            echo "::error::ori-memory@${{ steps.v.outputs.version }} is already on npm. Bump package.json first."
-            exit 1
+          if [ "$(npm view "ori-memory@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "ori-memory@$VERSION is already published; nothing to stage."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Install
+        if: steps.v.outputs.new == 'true'
         run: npm ci
 
       - name: Cache Embedding Model
+        if: steps.v.outputs.new == 'true'
         uses: actions/cache@v4
         with:
           path: node_modules/@huggingface/transformers/.cache
           key: hf-${{ runner.os }}-all-MiniLM-L6-v2
 
       - name: Prefetch Embedding Model
+        if: steps.v.outputs.new == 'true'
         run: node scripts/prefetch-model.mjs
 
       - name: Test
+        if: steps.v.outputs.new == 'true'
         run: npm test
 
-      # prepublishOnly runs the changelog check, lint, build and bin smoke test.
-      - name: Publish
-        run: npm publish --provenance --access public
+      # Same gates as prepublishOnly: changelog, lint, build, bin smoke test.
+      - name: Pre-publish checks
+        if: steps.v.outputs.new == 'true'
+        run: node scripts/check-changelog.mjs && npm run lint && npm run build && npm run smoke:bin
 
-      - name: Tag and release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.v.outputs.version }}
+      - name: Stage on npm
+        if: steps.v.outputs.new == 'true'
+        run: npm stage publish --provenance
+
+      - name: Next step
+        if: steps.v.outputs.new == 'true'
         run: |
-          node scripts/release-notes.mjs "$VERSION" > RELEASE_NOTES.md
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
-          gh release create "v$VERSION" --title "v$VERSION" --notes-file RELEASE_NOTES.md
+          {
+            echo "### ori-memory@${{ steps.v.outputs.version }} is staged"
+            echo "Approve it at https://www.npmjs.com → your avatar → **Staged Packages** → **Approve**."
+            echo
+            echo "Release notes:"
+            echo
+            node scripts/release-notes.mjs "${{ steps.v.outputs.version }}"
+          } >> "$GITHUB_STEP_SUMMARY"
