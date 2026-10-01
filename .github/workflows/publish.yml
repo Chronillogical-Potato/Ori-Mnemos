@@ -40,10 +40,6 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
 
-      # Staged publishing needs npm >= 11.15.0.
-      - name: Update npm
-        run: npm install -g npm@latest && npm --version
-
       - name: Is this version new?
         id: v
         run: |
@@ -82,9 +78,14 @@ jobs:
         if: steps.v.outputs.new == 'true'
         run: node scripts/check-changelog.mjs && npm run lint && npm run build && npm run smoke:bin
 
+      # Staged publishing needs npm >= 11.15. Upgraded only here: npm 12 skips
+      # install scripts, so better-sqlite3 never built when npm ci ran under it.
       - name: Stage on npm
         if: steps.v.outputs.new == 'true'
-        run: npm stage publish --provenance
+        run: |
+          npm install -g npm@11
+          npm --version
+          npm stage publish --provenance
 
       - name: Next step
         if: steps.v.outputs.new == 'true'
