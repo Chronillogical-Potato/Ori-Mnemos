@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.7.1] - 2026-09-30
+
+### Breaking
+
+- **MCP tool surface: 21 → 14 tools.** Removed `ori_status`, `ori_query`,
+  `ori_query_important`, `ori_query_fading` (one `memory_sql` statement each;
+  see the README migration table), `ori_explore_start/_expand/_conclude`
+  (still available as `ori explore-start/-expand/-conclude` on the CLI), and
+  `ori_orient` (first-run onboarding moved into `ori_wake`). Tool descriptions
+  shrank ~2,500 → ~1,950 tokens per call.
+- **Forgetting is a dry run by default.** `release`, `purge` and `supersede`
+  only preview until called with `{ apply: true }`, matching `ori prune`.
+
+### Added
+
+- **`memory_sql` / `ori sql`**: read-only SQL over the index through six
+  stable views (`v_note`, `v_link`, `v_dangling`, `v_retrieval`, `v_session`,
+  `v_stage`). Writes are blocked by three independent layers.
+- **Forgetting**: `supersede`, `release`, `purge`, with a blast-radius cap.
+  ForgetEval 0/1000 → 978/1000.
+- **Library entry**: `import { recall } from "ori-memory"` now works. Every
+  earlier version had no `main`/`exports`. `ori-memory/cli` resolves the binary.
+- **`ori index export-learned` / `import-learned`**: `.ori/` holds learned state
+  (Q-values, co-occurrence, retrieval history) that the markdown cannot
+  rebuild. Export it before deleting the index.
+- **`ori add -d/--description -p/--project`**, and the same fields on
+  `ori_add` (#39).
+- **What's new**: the first session on a new version shows the agent these
+  notes once; `ori whats-new` and `ori_whats_new` read them any time.
+- Typed decisions (`decide`) with a trained local head for note type.
+
+### Fixed
+
+- **Learning ranked used notes below unused ones (#37).** Unlearned Q starts
+  at 0, only real use (citation, update, re-recall) earns credit, and Q
+  reranking now actually runs in the CLI and reaches rankings. Optional,
+  ask-once reset for old-rule learning via `ori_learning_reset`.
+- **Inline code made fake wikilinks (#40).** Bash `` `[[ -t 0 ]]` `` in prose
+  no longer counts as a link.
+- **Learner rows for notes that do not exist (#41).** Dangling links and
+  parser false positives no longer get `note_q` rows; never-credited phantom
+  rows are pruned on index sync, so `ori health` counts real notes.
+- **New notes were born orphaned (#38).** The template no longer ships
+  placeholder `[[related note]]` / `[[relevant map]]` links, and `ori add`
+  strips them from older vault templates.
+- **Silent LLM disable (#42).** A configured `api_key_env` that does not
+  resolve now warns instead of quietly turning LLM features off.
+- **Promotion routed 74% of project notes to the fallback.** Project tags and
+  map titles are now compared by slug, and the fallback warns.
+- `graph_metric` is actually written; exact-identifier recall reads note
+  bodies; 11 `ori sql` output-contract defects; the recovery command rebuilt
+  the wrong vault.
+- Query-type lambda shifts removed and lambda capped at the measured optimum.
+
 ## [0.7.0] - 2026-09-16
 
 Correctness release. Every fix below is behaviour reachable on 0.6.1, which is

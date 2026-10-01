@@ -4,7 +4,10 @@
 import { readFileSync } from "node:fs";
 const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const log = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
-if (!new RegExp(`^## \[${version.replace(/\./g, "\.")}\]`, "m").test(log)) {
+// Escape with "\\" - in a template literal "\[" and "\." are just "[" and ".",
+// which made this a character class that could never match a real heading.
+const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+if (!new RegExp(`^## \\[${escaped}\\]`, "m").test(log)) {
   console.error(`CHANGELOG.md has no "## [${version}]" section. Users see these notes after updating; add it before publishing.`);
   process.exit(1);
 }
