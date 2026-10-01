@@ -34,7 +34,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          # 22, not 24: better-sqlite3 has no prebuilt binary for 24 on CI.
+          # Staged publishing needs Node >= 22.14.
+          node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
 
