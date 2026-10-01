@@ -1,4 +1,17 @@
-import type { LinkGraph } from "./graph.js";
+import { maskCode, type LinkGraph } from "./graph.js";
+
+/**
+ * A note with more incoming links than this is a hub (an index, a top-level
+ * map). Hubs are never auto-linked from prose and never used as a
+ * triangle-closing pivot (#44, #45): every note links them, so they carry no
+ * signal about what THIS note relates to. 128 matches the bootstrap poster
+ * cap for the same reason.
+ */
+export const HUB_DEGREE = 128;
+
+export function isHub(graph: LinkGraph, title: string, cap = HUB_DEGREE): boolean {
+  return (graph.incoming.get(title)?.size ?? 0) > cap;
+}
 
 export type DetectedLink = {
   title: string;
@@ -64,12 +77,16 @@ function isInsideWikiLink(body: string, offset: number): boolean {
 /**
  * Scan body text for mentions of existing note titles.
  * Returns detected mentions sorted by offset.
- * Skips mentions already wrapped in [[]].
+ * Skips mentions already wrapped in [[]], and anything inside fenced or
+ * inline code (#44): a title inside a code sample is not a reference, and
+ * applyLinks would rewrite the code.
  */
 export function detectLinks(
   body: string,
   existingTitles: string[]
 ): DetectedLink[] {
+  // Offsets into the mask are offsets into body; code is blank in the mask.
+  const text = maskCode(body);
   // Sort longest first to avoid partial matches
   const sorted = [...existingTitles].sort((a, b) => b.length - a.length);
   const results: DetectedLink[] = [];
@@ -80,7 +97,7 @@ export function detectLinks(
     const pattern = titleToPattern(title);
     let match: RegExpExecArray | null;
 
-    while ((match = pattern.exec(body)) !== null) {
+    while ((match = pattern.exec(text)) !== null) {
       const offset = match.index;
       const length = match[0].length;
 
@@ -133,8 +150,11 @@ export function applyLinks(body: string, links: DetectedLink[]): string {
 export function suggestLinks(
   frontmatter: Record<string, unknown>,
   body: string,
-  vaultIndex: VaultIndex
+  vaultIndex: VaultIndex,
+  opts: { exclude?: Iterable<string> } = {}
 ): LinkSuggestion[] {
+  const excluded = new Set(opts.exclude ?? []);
+  const linkable = linkableTitles(vaultIndex, excluded);
   const suggestions = new Map<string, LinkSuggestion>();
   const noteProject = Array.isArray(frontmatter.project)
     ? (frontmatter.project as string[])
@@ -144,7 +164,7 @@ export function suggestLinks(
     : [];
 
   // Title match suggestions (from detectLinks)
-  const detected = detectLinks(body, vaultIndex.titles);
+  const detected = detectLinks(body, linkable);
   for (const link of detected) {
     if (!link.alreadyLinked) {
       suggestions.set(link.title, {
@@ -201,38 +221,60 @@ export function suggestLinks(
   // Shared neighborhood (triangle closing)
   // If the new note links to X, and Y also links to X (or X links to Y),
   // suggest Y as a connection.
+  //
+  // Hubs are skipped as pivots (#45): a hub's ~every-note neighborhood gave
+  // hundreds of candidates at one confidence, and the tie kept insertion
+  // order, so the suggestion was the alphabetical head of the vault. Among
+  // the rest, a candidate reached through more of this note's links ranks
+  // higher (`shared`), and title breaks any remaining tie deterministically.
   const myLinks = new Set(
     detected.filter((d) => !d.alreadyLinked).map((d) => d.title)
   );
-  for (const linkedTitle of myLinks) {
-    // Find other notes that also link to linkedTitle
-    const coLinkers = vaultIndex.graph.incoming.get(linkedTitle);
-    if (coLinkers) {
-      for (const coLinker of coLinkers) {
-        if (suggestions.has(coLinker) || myLinks.has(coLinker)) continue;
-        suggestions.set(coLinker, {
-          title: coLinker,
-          reason: "shared-neighborhood",
-          confidence: 0.5,
-        });
-      }
+  const shared = new Map<string, number>();
+  const consider = (title: string, confidence: number): void => {
+    if (myLinks.has(title) || excluded.has(title)) return;
+    const prev = suggestions.get(title);
+    if (prev && prev.reason !== "shared-neighborhood") return;
+    shared.set(title, (shared.get(title) ?? 0) + 1);
+    if (!prev || prev.confidence < confidence) {
+      suggestions.set(title, { title, reason: "shared-neighborhood", confidence });
     }
-    // Find notes that linkedTitle links to
-    const outgoing = vaultIndex.graph.outgoing.get(linkedTitle);
-    if (outgoing) {
-      for (const target of outgoing) {
-        if (suggestions.has(target) || myLinks.has(target)) continue;
-        suggestions.set(target, {
-          title: target,
-          reason: "shared-neighborhood",
-          confidence: 0.45,
-        });
-      }
+  };
+  for (const linkedTitle of myLinks) {
+    if (isHub(vaultIndex.graph, linkedTitle)) continue;
+    // Other notes that also link to linkedTitle
+    for (const coLinker of vaultIndex.graph.incoming.get(linkedTitle) ?? []) {
+      consider(coLinker, 0.5);
+    }
+    // Notes that linkedTitle links to
+    for (const target of vaultIndex.graph.outgoing.get(linkedTitle) ?? []) {
+      consider(target, 0.45);
     }
   }
 
   return Array.from(suggestions.values())
-    .sort((a, b) => b.confidence - a.confidence)
+    .sort(
+      (a, b) =>
+        b.confidence - a.confidence ||
+        (shared.get(b.title) ?? 0) - (shared.get(a.title) ?? 0) ||
+        a.title.localeCompare(b.title)
+    )
     .slice(0, 5);
+}
+
+/**
+ * Titles that may be auto-linked from prose: not excluded by the caller and
+ * not a hub (#44). The default area (usually `index`) is passed in as an
+ * exclusion by promote; its name is a common word and every note already
+ * reaches it through the Areas footer.
+ */
+export function linkableTitles(
+  vaultIndex: VaultIndex,
+  exclude: Iterable<string> = []
+): string[] {
+  const excluded = new Set(exclude);
+  return vaultIndex.titles.filter(
+    (t) => !excluded.has(t) && !isHub(vaultIndex.graph, t)
+  );
 }
 

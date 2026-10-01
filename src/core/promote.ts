@@ -8,6 +8,7 @@ import {
   detectLinks,
   applyLinks,
   suggestLinks,
+  isHub,
   type DetectedLink,
   type LinkSuggestion,
   type VaultIndex,
@@ -87,44 +88,48 @@ export function isTemplatePlaceholder(body: string): boolean {
  * Parse an existing footer section from the body.
  * Looks for "## <heading>" or "<heading>:" followed by lines starting with "- ".
  */
-function parseFooter(body: string, heading: string): string[] {
-  // Match both "## Areas" and "Areas:" formats
+type FooterItem = { title: string; line: string };
+
+function parseFooter(body: string, heading: string): FooterItem[] {
+  // Match both "## Areas" and "Areas:" formats, in EVERY section with that
+  // heading: a note can carry its own footer plus an empty template one
+  // (#46), and reading only the first would drop whichever came second.
   const patterns = [
-    new RegExp(`^##\\s+${escapeRegex(heading)}\\s*$`, "m"),
-    new RegExp(`^${escapeRegex(heading)}:\\s*$`, "m"),
+    new RegExp(`^##\\s+${escapeRegex(heading)}\\s*$`, "gm"),
+    new RegExp(`^${escapeRegex(heading)}:\\s*$`, "gm"),
   ];
 
+  const items: FooterItem[] = [];
   for (const pattern of patterns) {
-    const match = pattern.exec(body);
-    if (!match) continue;
+    for (const match of body.matchAll(pattern)) {
+      const startIdx = (match.index ?? 0) + match[0].length;
+      const remaining = body.slice(startIdx);
+      const lines = remaining.split("\n");
 
-    const startIdx = match.index + match[0].length;
-    const items: string[] = [];
-    const remaining = body.slice(startIdx);
-    const lines = remaining.split("\n");
-
-    const knownHeadings = FOOTER_HEADINGS;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("- ")) {
-        // Extract wiki-link title from "- [[title]]" or "- [[title]] -- reason"
-        const linkMatch = trimmed.match(/^-\s+\[\[([^\]]+)\]\]/);
-        if (linkMatch) {
-          items.push(linkMatch[1]);
+      const knownHeadings = FOOTER_HEADINGS;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("- ")) {
+          // Title from "- [[title]]" or "- [[title]] -- reason". Keep the whole
+          // line: the reason is the author's, and re-rendering from the title
+          // alone deleted it on every promote (#46).
+          const linkMatch = trimmed.match(/^-\s+\[\[([^\]]+)\]\]/);
+          if (linkMatch) {
+            items.push({ title: linkMatch[1], line: trimmed });
+          }
+        } else if (trimmed.length === 0) {
+          continue;
+        } else if (
+          trimmed.startsWith("#") ||
+          trimmed.startsWith("---") ||
+          knownHeadings.some((h) => trimmed === `${h}:` || trimmed === `## ${h}`)
+        ) {
+          break;
         }
-      } else if (trimmed.length === 0) {
-        continue;
-      } else if (
-        trimmed.startsWith("#") ||
-        trimmed.startsWith("---") ||
-        knownHeadings.some((h) => trimmed === `${h}:` || trimmed === `## ${h}`)
-      ) {
-        break;
       }
     }
-    return items;
   }
-  return [];
+  return items;
 }
 
 function escapeRegex(s: string): string {
@@ -180,19 +185,23 @@ function formatFooters(areas: string[], links: string[]): string {
 
   if (links.length > 0) {
     footer += "\n\nRelevant Notes:";
-    for (const link of links) {
-      footer += `\n- [[${link}]]`;
-    }
+    for (const line of links) footer += `\n${line}`;
   }
 
   if (areas.length > 0) {
     footer += "\n\nAreas:";
-    for (const area of areas) {
-      footer += `\n- [[${area}]]`;
-    }
+    for (const line of areas) footer += `\n${line}`;
   }
 
   return footer + "\n";
+}
+
+/** Existing lines first (verbatim, first occurrence wins), then new titles. */
+function mergeFooter(existing: FooterItem[], added: string[]): string[] {
+  const seen = new Map<string, string>();
+  for (const item of existing) if (!seen.has(item.title)) seen.set(item.title, item.line);
+  for (const title of added) if (!seen.has(title)) seen.set(title, `- [[${title}]]`);
+  return [...seen.values()];
 }
 
 /**
@@ -206,8 +215,8 @@ export function injectFooters(
   const existingAreas = parseFooter(body, "Areas");
   const existingLinks = parseFooter(body, "Relevant Notes");
 
-  const mergedAreas = [...new Set([...existingAreas, ...areas])];
-  const mergedLinks = [...new Set([...existingLinks, ...links])];
+  const mergedAreas = mergeFooter(existingAreas, areas);
+  const mergedLinks = mergeFooter(existingLinks, links);
 
   const cleanBody = stripFooters(body);
 
@@ -327,8 +336,15 @@ export function computePromotion(input: PromoteInput): PromoteResult {
     }
   }
 
-  // 3. Detect wiki-links in body text
-  const detectedLinks = detectLinks(body, existingTitles);
+  // 3. Detect wiki-links in body text. Not the default area or other hubs
+  // (#44): "index" is a common word, and every note reaches it via Areas.
+  const notLinkable = [defaultArea];
+  const detectedLinks = detectLinks(
+    body,
+    existingTitles.filter(
+      (t) => !notLinkable.includes(t) && !isHub(vaultIndex.graph, t)
+    )
+  );
   const unlinked = detectedLinks.filter((l) => !l.alreadyLinked);
   if (unlinked.length > 0) {
     changes.push(`auto-linked ${unlinked.length} mention(s) in body`);
@@ -338,7 +354,8 @@ export function computePromotion(input: PromoteInput): PromoteResult {
   const allSuggested = suggestLinks(
     { ...frontmatter, project: projects },
     body,
-    vaultIndex
+    vaultIndex,
+    { exclude: notLinkable }
   );
   // Auto-apply high-confidence suggestions
   const autoApplied = allSuggested.filter(

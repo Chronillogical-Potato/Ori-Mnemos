@@ -59,18 +59,16 @@ export function stripCodeFences(content: string): string {
 }
 
 /**
- * Blank CommonMark inline code spans (§6.1) so bash `[[ -t 0 ]]` written in
- * prose is not read as a wikilink (#40). A span opened by a run of N backticks
- * closes at the next run of exactly N. A span never crosses a blank line, so a
- * stray backtick cannot swallow links paragraphs away; an unclosed run is
- * literal text. Spans become a single space, newlines kept.
+ * [start, end) ranges of CommonMark inline code spans (§6.1). A span opened
+ * by a run of N backticks closes at the next run of exactly N. A span never
+ * crosses a blank line, so a stray backtick cannot swallow text paragraphs
+ * away; an unclosed run is literal text.
  */
-export function stripInlineCode(text: string): string {
-  let out = "";
+export function inlineCodeSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
   let i = 0;
   while (i < text.length) {
     if (text[i] !== "`") {
-      out += text[i];
       i++;
       continue;
     }
@@ -90,15 +88,67 @@ export function stripInlineCode(text: string): string {
       j++;
     }
     if (close === -1) {
-      out += text.slice(i, i + n);
       i += n;
       continue;
     }
-    const span = text.slice(i, close + n);
-    out += " " + span.replace(/[^\n]/g, "");
+    spans.push([i, close + n]);
     i = close + n;
   }
-  return out;
+  return spans;
+}
+
+/**
+ * Blank inline code spans so bash `[[ -t 0 ]]` written in prose is not read
+ * as a wikilink (#40). Spans become a single space, newlines kept.
+ */
+export function stripInlineCode(text: string): string {
+  let out = "";
+  let last = 0;
+  for (const [a, b] of inlineCodeSpans(text)) {
+    out += text.slice(last, a) + " " + text.slice(a, b).replace(/[^\n]/g, "");
+    last = b;
+  }
+  return out + text.slice(last);
+}
+
+/**
+ * Same-length mask of fenced code blocks and inline code spans: every code
+ * character becomes a space, newlines kept, so an offset into the result is
+ * an offset into the original. For callers that WRITE at match positions
+ * (auto-linking, #44); readers use stripCodeFences.
+ */
+export function maskCode(text: string): string {
+  const chars = text.split("");
+  const blank = (a: number, b: number): void => {
+    for (let k = a; k < b; k++) {
+      if (chars[k] !== "\n" && chars[k] !== "\r") chars[k] = " ";
+    }
+  };
+  // Fences, line by line, same rules as stripCodeFences.
+  let pos = 0;
+  let fenceChar: string | null = null;
+  let fenceLen = 0;
+  for (const line of text.split("\n")) {
+    const end = pos + line.length;
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fenceChar === null) {
+      if (open) {
+        fenceChar = open[1][0];
+        fenceLen = open[1].length;
+        blank(pos, end);
+      }
+    } else {
+      blank(pos, end);
+      if (open && open[1][0] === fenceChar && open[1].length >= fenceLen) {
+        fenceChar = null;
+        fenceLen = 0;
+      }
+    }
+    pos = end + 1;
+  }
+  // Inline spans in what is left; backticks inside fences are already blank.
+  for (const [a, b] of inlineCodeSpans(chars.join(""))) blank(a, b);
+  return chars.join("");
 }
 
 /**

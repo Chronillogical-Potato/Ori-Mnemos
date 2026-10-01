@@ -29,7 +29,9 @@ describe("package entry points", () => {
   });
 
   it("keeps the CLI bin separate from the library entry", () => {
-    expect(pkg.bin.ori).toBe("./dist/index.js");
+    // npm normalizes "./dist/index.js" to this on publish; keep the source in
+    // the published form so `npm publish` has nothing to auto-correct.
+    expect(pkg.bin.ori).toBe("dist/index.js");
   });
 
   it("exports the documented public surface", async () => {

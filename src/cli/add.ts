@@ -46,6 +46,27 @@ function validateTitle(title: string): { valid: boolean; reason?: string } {
 
 // slugify moved to core/slug.ts — shared with graph normalization (#32)
 
+/**
+ * Put caller content into the template (#46). Content that is already a
+ * complete note keeps its own structure:
+ * - its own H1 replaces the template title instead of sitting under it
+ * - its own Relevant Notes / Areas footer means the content IS the body;
+ *   wrapping it in the template appended a second, empty footer plus the
+ *   template's instructions after the author's footer
+ */
+export function composeBody(templateBody: string, titleLine: string, content: string): string {
+  const ownH1 = /^\s*# \S/.test(content);
+  const ownFooter = /^(?:## )?(?:Relevant Notes|Areas):?\s*$/m.test(content);
+  if (ownFooter) {
+    return ownH1 ? `${content.trim()}\n` : `${titleLine}\n\n${content.trim()}\n`;
+  }
+  // Function replacers: a "$&" or "$1" in the content is text, not a pattern.
+  const titled = ownH1
+    ? templateBody.replace(/# \{[^}]+\}[ \t]*\r?\n(?:[ \t]*\r?\n)*/, () => "")
+    : templateBody.replace(/# \{[^}]+\}/, () => titleLine);
+  return titled.replace(/\{Content[^}]*\}/, () => content);
+}
+
 export async function runAdd(options: AddOptions): Promise<AddResult> {
   // Layer 1: Title validation
   const titleCheck = validateTitle(options.title);
@@ -93,9 +114,7 @@ export async function runAdd(options: AddOptions): Promise<AddResult> {
   const titleLine = `# ${options.title}`;
   let body: string;
   if (options.content) {
-    body = templateBody
-      .replace(/# \{[^}]+\}/, titleLine)
-      .replace(/\{Content[^}]*\}/, options.content);
+    body = composeBody(templateBody, titleLine, options.content);
   } else {
     body = templateBody.replace(/# \{[^}]+\}/, titleLine);
   }
